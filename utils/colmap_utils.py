@@ -48,6 +48,7 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     }
     
     # Extract camera parameters
+    # In most cases use just use a single camera, thus just ignore the for loop
     cameras = {}
     for camera_id, camera in reconstruction.cameras.items():
         K = np.eye(3)
@@ -152,3 +153,18 @@ def process_colmap_data(correspondences):
     print("Point cloud coordinates are represented in the world coordinate system")
 
     return K, w2c, points_npy
+
+if __name__ == "__main__":
+    # Example usage
+    reconstruction_folder = "results/0318/colmap/reconstruction/0"
+    output_file = "./colmap_correspondences.json"
+    
+    # Extract and save correspondences
+    correspondences = extract_and_save_correspondences(reconstruction_folder, output_file)
+    
+    # Process the COLMAP data
+    K, w2c, points_npy = process_colmap_data(correspondences)
+    
+    print("Intrinsic matrix K:\n", K)
+    print("World-to-camera matrices shape:", w2c.shape)
+    print("Point cloud data shape:", points_npy.shape)

@@ -80,7 +80,7 @@ def run_mast3r(input_dir: str,
     # Prepare image pairs for matching
     pairs = make_pairs(imgs, scene_graph="complete", symmetrize=True)
     kdata = kapture_import_image_folder_or_list((input_dir, img_relpath), 
-                                                use_single_camera=False)
+                                                use_single_camera=True)
     image_names = kdata.records_camera.data_list()
     image_pairs = [
         (img_relpath[img1["idx"]], img_relpath[img2["idx"]])
