@@ -1,0 +1,4 @@
+[submodule "mast3r"]
+	path = mast3r
+	url = https://github.com/naver/mast3r.git
+	branch = mast3r_sfm
