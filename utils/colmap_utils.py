@@ -35,6 +35,7 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     """
     
     # Load the reconstruction data
+    # https://colmap.github.io/pycolmap/pycolmap.html#pycolmap.Reconstruction
     reconstruction = pycolmap.Reconstruction(reconstruction_path)
     if not reconstruction:
         raise RuntimeError(f"Failed to load reconstruction from {reconstruction_path}")
@@ -43,71 +44,67 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     
     # Dictionary to store all correspondences
     correspondences = {
+        "cameras": {},
         "images": {},
         "points3D": {}
     }
     
     # Extract camera parameters
-    # In most cases use just use a single camera, thus just ignore the for loop
-    cameras = {}
+    # In most cases we just use a single camera, thus just ignore the for loop
     for camera_id, camera in reconstruction.cameras.items():
         K = np.eye(3)
         K[0, 0] = camera.focal_length_x
         K[1, 1] = camera.focal_length_y
         K[0, 2] = camera.principal_point_x
         K[1, 2] = camera.principal_point_y
-        cameras[camera_id] = {
+        correspondences["cameras"] = {
             "intrinsics": K.tolist(),
         }
-    correspondences["cameras"] = cameras
+        break
     
-    # Extract image data and 2D-3D tracks
+    # 3D points
+    for i, (point3D_id, point3D) in enumerate(reconstruction.points3D.items()):
+        correspondences["points3D"][int(point3D_id)] = { 
+            "sorted_id": i,
+            "xyz": point3D.xyz.tolist(),
+            "color": point3D.color.tolist(),
+            "error": float(point3D.error),
+        }
+
+    # Extract 2D-3D correspondences
+    points2D = []
+    pts2d_idx = 0
     for image_id, image in reconstruction.images.items():
-        image_name = image.name
-        camera_id = image.camera_id
-        
+        # if not image.has_pose():
+        #     continue
         # Get the camera pose (camera-to-world transformation)
         cam_from_world = image.cam_from_world.matrix
         if callable(cam_from_world):
             cam_from_world = cam_from_world()
         
         # Extract 2D points and their corresponding 3D points
-        points2D_data = []
+        pts2d_indices, pts3d_indices = [], []
         for point2D_idx, point2D in enumerate(image.points2D):
-            point_data = {
-                "x": float(point2D.xy[0]),
-                "y": float(point2D.xy[1]),
-                "point3D_id": int(point2D.point3D_id) if point2D.has_point3D() else -1
-            }
-            points2D_data.append(point_data)
-            
-            # For reverse lookup, add the observation to the 3D point track
-            if point2D.has_point3D():
-                point3D_id = int(point2D.point3D_id)
-                if point3D_id not in correspondences["points3D"]:
-                    point3D = reconstruction.points3D[point3D_id]
-                    correspondences["points3D"][point3D_id] = {
-                        "id": point3D_id,
-                        "xyz": point3D.xyz.tolist(),
-                        "color": point3D.color.tolist(),
-                        "error": float(point3D.error),
-                        "track": []  # List of (image_id, point2D index) pairs
-                    }
-                # Append this observation to the track
-                correspondences["points3D"][point3D_id]["track"].append({
-                    "image_id": image_id,
-                    "image_name": image_name,
-                    "point2D_idx": point2D_idx
-                })
-        
-        # Save image data and associated observations
-        correspondences["images"][image_id] = {
-            "id": image_id,
-            "name": image_name,
-            "camera_id": camera_id,
-            "cam_from_world": cam_from_world.tolist(),
-            "points2D": points2D_data
+            if not point2D.has_point3D():
+                continue
+            pt_id = int(point2D.point3D_id)
+            if pt_id in correspondences["points3D"]:
+                points2D.append((float(point2D.xy[0]), float(point2D.xy[1])))
+                pts2d_indices.append(pts2d_idx)
+                pts3d_indices.append(correspondences["points3D"][pt_id]["sorted_id"])
+                pts2d_idx += 1
+        assert len(pts2d_indices) == len(pts3d_indices), f"Length mismatch: {len(pts2d_indices)} != {len(pts3d_indices)}"
+        correspondences["images"][int(image_id) - 1] = {
+            "wolrd_to_cam": cam_from_world.tolist(),
+            "pts2d_indices": pts2d_indices,
+            "pts3d_indices": pts3d_indices,
         }
+    
+    # for i in range(len(reconstruction.images)):
+    #     print(np.max(correspondences["images"][i]["pts3d_indices"]))
+
+    # 2D points
+    correspondences["points2D"] = points2D
     
     # Save the correspondences dictionary to a file
     with open(output_file, "w") as f:
@@ -115,44 +112,60 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     
     print(f"Saved correspondences to {output_file}")
     print(f"Total images: ", len(correspondences["images"]))
+    print(f"Total 2D points: ", len(correspondences["points2D"]))
     print(f"Total 3D points: ", len(correspondences["points3D"]))
     
     return correspondences
 
 
 def process_colmap_data(correspondences):
+    """
+    Returns the camera intrinsic matrix, world-to-camera transformation matrices, 3D points, 2D points, and visibility.
+    """
     # Extract the primary camera intrinsics
-    K_lists = []
-    for img_info in correspondences["images"].values():
-        cam_id = img_info["camera_id"]
-        # Ensure that the camera_id is correctly referenced as an integer key
-        K_lists.append(correspondences["cameras"][cam_id]["intrinsics"])
-    K = np.mean(K_lists, axis=0).reshape(3, 3)  # Average intrinsics to get the main camera matrix
+    K = np.array(correspondences["cameras"]["intrinsics"]).reshape(3, 3)
     print("Primary camera intrinsic matrix:\n", K)
 
-    # Save the world-to-camera transformation matrices (n, 4, 4)
-    w2c = []
-    for i in range(1, len(correspondences["images"]) + 1):
-        img_info = correspondences["images"][i]
-        mat = np.eye(4)
-        mat[:3, :] = np.array(img_info["cam_from_world"]).reshape(3, 4)
-        w2c.append(mat)
-    w2c = np.asarray(w2c, dtype=np.float64)
-    # np.save("world2cam.npy", w2c)
-    print(f"Saved camera pose matrices with shape {w2c.shape}")
+    # Save 2D points
+    points2D = np.asarray(correspondences["points2D"])
+    print(f"Saved 2d points with shape {points2D.shape}")
 
-    # Save the point cloud data (m, 6) and verify the coordinate system
-    points = []
-    for p3d in correspondences["points3D"].values():
-        xyz = np.array(p3d["xyz"])
-        rgb = np.array(p3d["color"]) / 255.0  # Normalize color values to [0, 1]
-        points.append(np.concatenate([xyz, rgb]))
-    points_npy = np.vstack(points)
-    np.save("point_cloud.npy", points_npy)
-    print(f"Saved point cloud data with shape {points_npy.shape}")
+    # Save 3D points
+    points3D_dict = correspondences["points3D"]
+    points3D = np.zeros((len(points3D_dict), 7), dtype=np.float32)
+    for point_id in points3D_dict.keys():
+        point = points3D_dict[point_id]
+        sorted_id = point["sorted_id"]
+        points3D[sorted_id, 0:3] = point["xyz"]
+        points3D[sorted_id, 3:6] = np.asarray(point["color"]) / 255.0
+        points3D[sorted_id, 6] = point["error"]
+    #     xyz = np.array(point["xyz"])
+    #     rgb = np.array(point["color"]) / 255.0  # Normalize color values to [0, 1]
+    #     error = np.array(point["error"]).reshape(1, )
+    #     points3D.append(np.concatenate([xyz, rgb, error]))
+    # points3D = np.vstack(points3D)
+    np.save("tmp_point_cloud.npy", points3D)
+    print(f"Saved point cloud data with shape {points3D.shape}")
     print("Point cloud coordinates are represented in the world coordinate system")
+    
+    # Save 3D-2D correspondences
+    images_dict = correspondences["images"]
+    world2cam_poses = []
+    visibility = {}
+    for image_id in sorted(images_dict.keys()):
+        img_info = correspondences["images"][image_id]
+        
+        # Save eye poses
+        mat = np.eye(4)
+        mat[:3, :] = np.array(img_info["wolrd_to_cam"]).reshape(3, 4)
+        world2cam_poses.append(mat)
+        
+        visibility[image_id] = {
+            "pts2d_indices": img_info["pts2d_indices"],
+            "pts3d_indices": img_info["pts3d_indices"]
+        }
 
-    return K, w2c, points_npy
+    return K, np.asarray(world2cam_poses), points3D, points2D, visibility
 
 if __name__ == "__main__":
     # Example usage
@@ -163,8 +176,10 @@ if __name__ == "__main__":
     correspondences = extract_and_save_correspondences(reconstruction_folder, output_file)
     
     # Process the COLMAP data
-    K, w2c, points_npy = process_colmap_data(correspondences)
+    K, w2c, points3D, points2D, visibility = process_colmap_data(correspondences)
     
     print("Intrinsic matrix K:\n", K)
     print("World-to-camera matrices shape:", w2c.shape)
-    print("Point cloud data shape:", points_npy.shape)
+    print("Point cloud data shape:", points3D.shape)
+    print("2D points shape:", points2D.shape)
+

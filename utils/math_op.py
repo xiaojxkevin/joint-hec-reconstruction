@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import linprog
+from scipy.spatial.transform import Rotation as R
 
 
 def inv(T: np.ndarray):
@@ -27,6 +28,49 @@ def skew(v: np.ndarray):
         dtype=np.float64,
     )
 
+def transMat2Vec(T:np.ndarray):
+        """
+        Convert a 4x4 transformation matrix to a parameter vector.
+        
+        Args:
+            T (np.ndarray): 4x4 transformation matrix
+            
+        Returns:
+            np.ndarray: Parameter vector [rx, ry, rz, tx, ty, tz]
+        """
+        # Extract rotation matrix
+        rot_matrix = T[:3, :3]
+        # Convert to rotation vector
+        rot_vec = R.from_matrix(rot_matrix).as_rotvec()
+        # Extract translation vector
+        trans_vec = T[:3, 3]
+        
+        # Combine into parameter vector
+        return np.concatenate([rot_vec, trans_vec])
+    
+def vec2transMat(params:np.ndarray):
+    """
+    Convert a parameter vector to a 4x4 transformation matrix.
+    
+    Args:
+        params (np.ndarray): Parameter vector [rx, ry, rz, tx, ty, tz]
+        
+    Returns:
+        np.ndarray: 4x4 transformation matrix
+    """
+    # Extract rotation vector and convert to rotation matrix
+    rot_vec = params[:3]
+    rot_matrix = R.from_rotvec(rot_vec).as_matrix()
+    
+    # Extract translation vector
+    trans_vec = params[3:6]
+    
+    # Create transformation matrix
+    T = np.eye(4)
+    T[:3, :3] = rot_matrix
+    T[:3, 3] = trans_vec
+    
+    return T
 
 def minimize_L1_norm(A: np.ndarray, b: np.ndarray):
     """

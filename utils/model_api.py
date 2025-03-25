@@ -61,8 +61,19 @@ def run_mast3r(input_dir: str,
         device (str, optional): Device to run the model on ("cuda" or "cpu"). Defaults to "cuda".
     
     Returns:
-        tuple: Camera intrinsics, camera-to-world transformation matrices, and 3D points.
+        tuple:
     """
+    recon_path = os.path.join(output_dir, "reconstruction")
+    reconstruction_folder = os.path.join(recon_path, "0")
+    correspondence_file = os.path.join(output_dir, "colmap_raw.json")
+    if os.path.exists(correspondence_file):
+        print("-------- Loading existing correspondences --------")
+        correspondence_data = extract_and_save_correspondences(reconstruction_folder, 
+                                                           correspondence_file)
+        K, world2cam, points3D, points2D, visibility = process_colmap_data(correspondence_data)
+        cam2world = np.asarray([inv(p) for p in world2cam])
+        return K, cam2world, points3D, points2D, visibility
+
     # Create output directory if it does not exist
     os.makedirs(output_dir, exist_ok=True)
 
@@ -129,7 +140,6 @@ def run_mast3r(input_dir: str,
         for image_path1, image_path2 in colmap_image_pairs:
             f.write("{} {}\n".format(image_path1, image_path2))
     pycolmap.verify_matches(db_path, os.path.join(output_dir, "pairs.txt"))
-    recon_path = os.path.join(output_dir, "reconstruction")
     if os.path.isdir(recon_path):
         shutil.rmtree(recon_path)
     os.makedirs(recon_path, exist_ok=True)
@@ -137,16 +147,13 @@ def run_mast3r(input_dir: str,
 
     ############################################ Save results
     # Load the reconstruction results from COLMAP
-    reconstruction_folder = os.path.join(recon_path, "0")
     # Extract and save correspondences between 2D and 3D points
-    correspondence_file = os.path.join(output_dir, "colmap_raw.json")
     correspondence_data = extract_and_save_correspondences(reconstruction_folder, 
                                                            correspondence_file)
-    
-    K, world2cam, points3D = process_colmap_data(correspondence_data)
+    K, world2cam, points3D, points2D, visibility = process_colmap_data(correspondence_data)
     cam2world = np.asarray([inv(p) for p in world2cam])
     
-    return K, cam2world, points3D
+    return K, cam2world, points3D, points2D, visibility
 
 
 if __name__ == "__main__":

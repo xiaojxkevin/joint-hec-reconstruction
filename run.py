@@ -8,7 +8,7 @@ import utils.geometric_util as geomu
 from utils.math_op import inv
 from utils.calib import compute_As_Bs, solve_hand_eye_se3
 from utils.visual import vis_scene
-
+from utils.ba import run_hand_eye_bundle_adjustment
 
 def load_hand_poses(file_path: str, num: int) -> np.ndarray:
     """
@@ -33,14 +33,14 @@ def jcr_run(
 
     hand2base_poses = load_hand_poses(eef_path, num=num_imgs)
     # hand2base_poses = np.asarray([inv(pose) for pose in hand2base_poses], dtype=np.float64)
-    K, eye2obj_poses, pts_data = run_mast3r(
+    K, eye2obj_poses, points3D, points2D, visibility = run_mast3r(
         input_dir=img_dir,
         output_dir=os.path.join(save_dir, "colmap"),
         model_path=model_path,
         num_imgs=num_imgs,
     )
     assert hand2base_poses.shape[0] == eye2obj_poses.shape[0], f"{hand2base_poses.shape[0]} != {eye2obj_poses.shape[0]}"
-    pts, rgb_colors = pts_data[:, :3], pts_data[:, 3:]
+    pts, rgb_colors, pts_errors = points3D[:, :3], points3D[:, 3:6], points3D[:, 6]
 
     As, Bs = compute_As_Bs(eye2obj_poses, hand2base_poses)
 
@@ -52,6 +52,7 @@ def jcr_run(
     T_eye2hand = np.eye(4, dtype=np.float64)
     T_eye2hand[:3, :3] = R_eye2hand
     T_eye2hand[:3, 3] = t_eye2hand
+    np.savetxt(f"{save_dir}/init_T_eye2hand.txt", T_eye2hand, fmt="%.6f")
 
     pts *= scale
     eye2obj_poses[:, :3, 3] *= scale
@@ -59,6 +60,7 @@ def jcr_run(
     obj2eye_poses = np.asarray([inv(pose) for pose in eye2obj_poses], dtype=np.float64)
     idx = 0
     pts_in_base = geomu.transform_pts_np(pts, eye2base_poses[idx] @ obj2eye_poses[idx])
+    # np.savetxt(f"{save_dir}/eye2base_poses.txt", geomu.matrices_to_tum(eye2base_poses), fmt="%.6f")
 
     ############################# for debugging #############################
     # check for obj2base transformation
@@ -66,21 +68,7 @@ def jcr_run(
     print("obj2base transformation:")
     for idx in range(num_imgs):
         print(eye2base_poses[idx] @ obj2eye_poses[idx])
-        ############################# for debugging #############################
-
-    tensors_to_save = {
-        "eye2base": eye2base_poses,
-        "hand2base": hand2base_poses,
-        "pts_in_base": pts_in_base,
-        "pts_colors": rgb_colors,
-    }
-
-    np.savetxt(f"{save_dir}/T_eye2hand.txt", T_eye2hand, fmt="%.6f")
-    np.savetxt(f"{save_dir}/eye2base_poses.txt", geomu.matrices_to_tum(eye2base_poses), fmt="%.6f")
-    saving_loc = os.path.join(save_dir, f"{exp_name}_{num_imgs}.pth")
-    torch.save(tensors_to_save, saving_loc)
-    print("<>" * 20)
-    print(f"Results saved at {saving_loc}")
+    ############################# for debugging #############################
 
     # Visualize constructed ptc
     pts_vis = pts_in_base[::]
@@ -90,8 +78,43 @@ def jcr_run(
         hand2base_poses,
         pts_vis,
         pts_color_vis,
-        f"{save_dir}/{exp_name}_{num_imgs}.html",
+        f"{save_dir}/init_{exp_name}_{num_imgs}.html",
     )
+
+    # Run bundle adjustment
+    print("----------------------- Run bundle adjustment ----------------------------------")
+    optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
+        K, inv(T_eye2hand), hand2base_poses, pts_in_base, points2D, visibility
+    )
+    eye2base_poses = hand2base_poses @ optimized_eye2hand
+    pts_vis = optimized_points[::]
+    vis_scene(
+        eye2base_poses,
+        hand2base_poses,
+        pts_vis,
+        pts_color_vis,
+        f"{save_dir}/init_{exp_name}_{num_imgs}.html",
+    )
+
+    ############################# for debugging #############################
+    # check for obj2base transformation
+    print("<>" * 20)
+    print("obj2base transformation:")
+    for idx in range(num_imgs):
+        print(eye2base_poses[idx] @ obj2eye_poses[idx])
+    ############################# for debugging #############################
+
+    tensors_to_save = {
+        # "K": K_opt,
+        "eye2base": eye2base_poses,
+        "hand2base": hand2base_poses,
+        "pts_in_base": optimized_points,
+        "pts_colors": rgb_colors,
+    }
+    saving_loc = os.path.join(save_dir, f"{exp_name}_{num_imgs}.pth")
+    torch.save(tensors_to_save, saving_loc)
+    print("<>" * 20)
+    print(f"Results saved at {saving_loc}")
 
 
 def main():
