@@ -29,11 +29,6 @@ from utils.colmap_utils import (
 )
 from utils.math_op import inv
 
-class Scene:
-    def __init__(self, world_to_cam, intrinsics, points3d):
-        self.world_to_cam = world_to_cam
-        self.intrinsics = intrinsics
-        self.points3d = points3d
 
 def get_img_lists(img_dir: str, num_imgs: int) -> list:
     # Return a sorted list of image paths (png, jpg, jpeg) limited to num_imgs
@@ -47,6 +42,7 @@ def run_mast3r(input_dir: str,
                output_dir: str,
                model_path: str,
                num_imgs: int = 8,
+               intrinsics: np.ndarray = None,
                image_size: int = 512,
                device: str = "cuda"):
     """

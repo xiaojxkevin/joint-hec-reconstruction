@@ -29,6 +29,52 @@ class HandEyeBundleAdjustment:
         self.n_views = base2hand_poses.shape[0]
         self.n_points = pts3d_in_base.shape[0]
     
+    def jacobian_sparsity(self):
+        """
+        Compute the sparsity pattern of the Jacobian matrix.
+        
+        Returns:
+            scipy.sparse matrix representing the Jacobian sparsity
+        """
+        # Total number of residuals
+        total_residuals = sum(len(self.visibility[idx]["pts2d_indices"]) * 2 for idx in range(self.n_views))
+        
+        # Total number of parameters
+        # 6 for hand2eye transformation + 3 * num_points
+        total_params = 6 + self.n_points * 3
+        
+        # Initialize sparse matrix
+        row_indices = []
+        col_indices = []
+        
+        # Track which parameters affect which residuals
+        current_residual = 0
+        for idx in range(self.n_views):
+            pts2d_count = len(self.visibility[idx]["pts2d_indices"])
+            pts3d_indices = self.visibility[idx]["pts3d_indices"]
+            
+            # Hand-eye transformation parameters affect all residuals
+            for r in range(current_residual, current_residual + pts2d_count * 2):
+                for p in range(6):  # 6 hand-eye parameters
+                    row_indices.append(r)
+                    col_indices.append(p)
+            
+            # 3D point parameters affect corresponding residuals
+            for local_idx, point_idx in enumerate(pts3d_indices):
+                for r in range(current_residual + local_idx * 2, current_residual + local_idx * 2 + 2):
+                    for p in range(3):  # 3 coordinates of point
+                        row_indices.append(r)
+                        col_indices.append(6 + point_idx * 3 + p)
+            
+            current_residual += pts2d_count * 2
+        
+        # Create sparse matrix
+        sparsity = sparse.csr_matrix(
+            (np.ones(len(row_indices)), (row_indices, col_indices)), 
+            shape=(total_residuals, total_params)
+        )
+        
+        return sparsity
     
     def objective_function(self, params):
         """
@@ -45,7 +91,7 @@ class HandEyeBundleAdjustment:
         
         for idx in range(self.n_views):
             base2hand = self.base2hand_poses[idx]
-            base2eye = base2hand @ hand2eye_mat
+            base2eye = hand2eye_mat @ base2hand
 
             pts3d_base_used = pts3d_base[self.visibility[idx]["pts3d_indices"]]
             pts3d_eye = pts3d_base_used @ base2eye[:3, :3].T + base2eye[:3, 3]
@@ -72,17 +118,19 @@ class HandEyeBundleAdjustment:
                                          self.pts3d_in_base.ravel()])
         
         # Compute sparsity pattern
-        # sparsity = self.jacobian_sparsity()
+        sparsity = self.jacobian_sparsity()
         
-        # Run the optimization
-        print("Starting bundle adjustment optimization...")
+        # Run the optimization with enhanced parameters
         result = least_squares(
             self.objective_function,
             initial_params,
+            jac_sparsity=sparsity,  # Use computed sparsity
             verbose=2,
             loss="huber",
             method='trf',
-            ftol=1e-4,
+            ftol=1e-5,
+            max_nfev=500,  # Limit number of function evaluations
+            tr_solver='lsmr'  # Use LSMR solver for sparse problems
         )
         
         # Extract optimized parameters

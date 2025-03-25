@@ -99,9 +99,6 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
             "pts2d_indices": pts2d_indices,
             "pts3d_indices": pts3d_indices,
         }
-    
-    # for i in range(len(reconstruction.images)):
-    #     print(np.max(correspondences["images"][i]["pts3d_indices"]))
 
     # 2D points
     correspondences["points2D"] = points2D
@@ -139,12 +136,7 @@ def process_colmap_data(correspondences):
         points3D[sorted_id, 0:3] = point["xyz"]
         points3D[sorted_id, 3:6] = np.asarray(point["color"]) / 255.0
         points3D[sorted_id, 6] = point["error"]
-    #     xyz = np.array(point["xyz"])
-    #     rgb = np.array(point["color"]) / 255.0  # Normalize color values to [0, 1]
-    #     error = np.array(point["error"]).reshape(1, )
-    #     points3D.append(np.concatenate([xyz, rgb, error]))
-    # points3D = np.vstack(points3D)
-    np.save("tmp_point_cloud.npy", points3D)
+    # np.save("tmp_point_cloud.npy", points3D)
     print(f"Saved point cloud data with shape {points3D.shape}")
     print("Point cloud coordinates are represented in the world coordinate system")
     

@@ -27,17 +27,19 @@ def jcr_run(
     eef_path: str,
     img_dir: str,
     num_imgs: int,
+    intrinsics: np.ndarray,
     save_dir: str,
     model_path: str,
 ):
 
     hand2base_poses = load_hand_poses(eef_path, num=num_imgs)
-    # hand2base_poses = np.asarray([inv(pose) for pose in hand2base_poses], dtype=np.float64)
+    base2hand_poses = np.asarray([inv(pose) for pose in hand2base_poses], dtype=np.float64)
     K, eye2obj_poses, points3D, points2D, visibility = run_mast3r(
         input_dir=img_dir,
         output_dir=os.path.join(save_dir, "colmap"),
         model_path=model_path,
         num_imgs=num_imgs,
+        intrinsics=intrinsics,
     )
     assert hand2base_poses.shape[0] == eye2obj_poses.shape[0], f"{hand2base_poses.shape[0]} != {eye2obj_poses.shape[0]}"
     pts, rgb_colors, pts_errors = points3D[:, :3], points3D[:, 3:6], points3D[:, 6]
@@ -84,8 +86,9 @@ def jcr_run(
     # Run bundle adjustment
     print("----------------------- Run bundle adjustment ----------------------------------")
     optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
-        K, inv(T_eye2hand), hand2base_poses, pts_in_base, points2D, visibility
+        K, inv(T_eye2hand), base2hand_poses, pts_in_base, points2D, visibility
     )
+    np.savetxt(f"{save_dir}/ba_T_eye2hand.txt", optimized_eye2hand, fmt="%.6f")
     eye2base_poses = hand2base_poses @ optimized_eye2hand
     pts_vis = optimized_points[::]
     vis_scene(
@@ -93,16 +96,8 @@ def jcr_run(
         hand2base_poses,
         pts_vis,
         pts_color_vis,
-        f"{save_dir}/init_{exp_name}_{num_imgs}.html",
+        f"{save_dir}/ba_{exp_name}_{num_imgs}.html",
     )
-
-    ############################# for debugging #############################
-    # check for obj2base transformation
-    print("<>" * 20)
-    print("obj2base transformation:")
-    for idx in range(num_imgs):
-        print(eye2base_poses[idx] @ obj2eye_poses[idx])
-    ############################# for debugging #############################
 
     tensors_to_save = {
         # "K": K_opt,
@@ -138,6 +133,11 @@ def main():
     eef_path = f"./data/{args.exp_name}/hand_tum.txt"
     img_dir = f"./data/{args.exp_name}/imgs"
     model_path = "./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+    intrinsic_path = f"./data/{args.exp_name}/intrinsics.txt"
+    if os.path.exists(intrinsic_path):
+        K = np.loadtxt(intrinsic_path, dtype=np.float64)
+    else:
+        K = None
     num_imgs = 0
     for filename in os.listdir(img_dir):
         ext = os.path.splitext(filename)[1].lower()
@@ -152,6 +152,7 @@ def main():
         eef_path=eef_path,
         img_dir=img_dir,
         num_imgs=num_imgs,
+        intrinsics=K,
         save_dir=save_dir,
         model_path=model_path,
     )
