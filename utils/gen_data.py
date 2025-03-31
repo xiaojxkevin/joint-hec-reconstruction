@@ -47,15 +47,10 @@ def generate_simulated_data(num_samples=10, noise_level=0.0):
     # Define ground truth parameters (assumed unknown, to be determined by calibration)
     # ----------------------------
     # Ground truth transformation from camera to hand (X to be determined by calibration)
-    cam_to_hand_true = random_se3(max_translation=0.1, max_rotation_deg=30)
-
-    # Fixed pose of the object in the base coordinate system (assuming the object is fixed 1m in front of the base)
-    base_to_object = np.eye(4)
-    base_to_object[:3, 3] = [
-        1.0,
-        0.0,
-        0.0,
-    ]  # The object is located 1m in front of the base
+    cam_to_hand_true = random_se3(max_translation=0.1, max_rotation_deg=60)
+    # Fixed pose of the object in the base coordinate system
+    base_to_object = random_se3(max_translation=1.0, max_rotation_deg=60)
+    scale_factor = 5 * np.random.rand() + 1e-2
 
     # ----------------------------
     # Generate simulated data
@@ -74,6 +69,7 @@ def generate_simulated_data(num_samples=10, noise_level=0.0):
             hand_to_base @ cam_to_hand
         )  # Camera pose = hand pose @ cam_to_hand
         cam_to_object = base_to_object @ cam_to_base
+        cam_to_object[:3, :3] /= scale_factor
 
         # Optional: add noise
         if noise_level > 0:
@@ -88,20 +84,9 @@ def generate_simulated_data(num_samples=10, noise_level=0.0):
         np.asarray(hand_to_base_list),
         np.asarray(cam_to_object_list),
         cam_to_hand_true,
+        scale_factor
     )
 
 
-# ----------------------------
-# Example usage
-# ----------------------------
 if __name__ == "__main__":
-    # Generate 8 sets of noise-free data
-    hand_to_base_list, cam_to_object_list, cam_to_hand_true = generate_simulated_data(
-        num_samples=8, noise_level=0.0
-    )
-
-    hand2base_poses = np.array(hand_to_base_list)
-    eye2obj_poses = np.array(cam_to_object_list)
-    np.save("hand2base_poses.npy", hand2base_poses)
-    np.save("eye2obj_poses.npy", eye2obj_poses)
-    np.save("eye2hand_true.npy", cam_to_hand_true)
+    pass

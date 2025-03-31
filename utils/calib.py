@@ -19,7 +19,7 @@ def compute_As_Bs(eye2obj_poses: np.ndarray, hand2base_poses: np.ndarray):
     return As, Bs
 
 
-def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray):
+def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray, use_ransac = True, inlier_ratio = 0.75):
     """
     Input:
         As: An array of shape (n, 4, 4) containing SE(3) matrices, where each element is a homogeneous transformation A_i.
@@ -32,6 +32,84 @@ def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray):
     n = As.shape[0]
     assert n > 0, "Number of SE(3) matrices should be greater than 0."
     # Step 1: Compute the rotation component R_X.
+    R_X = retrive_rotation(As, Bs)
+
+    # Step 2: Compute the translation component t_X.
+    t_X = None
+    C, d = [], []
+    for i in range(n):
+        # Extract the translation vectors from A_i and B_i.
+        tA_i = As[i, :3, 3].reshape(3, 1)
+        tB_i = Bs[i, :3, 3].reshape(3, 1)
+        # Construct the skew-symmetric matrix for tB_i (denoted as tB_i^).
+        tB_skew = skew(tB_i)
+        # Compute C_i and d_i.
+        RA_i = As[i, :3, :3]
+        Ci = tB_skew @ R_X.T @ (np.eye(3, dtype=np.float64) - RA_i)
+        di = tB_skew @ R_X.T @ tA_i
+        C.append(Ci)
+        d.append(di.reshape(-1, 1))  # Ensure the vector is a column vector.
+
+    if use_ransac:
+        # RANSAC parameters
+        max_iters = 100
+        error_threshold = 1e-2
+        min_samples = 2
+        best_inliers = []
+        threshold_num = int(inlier_ratio * n)
+        max_inliers = 0
+
+        for _ in range(max_iters):
+            # Randomly select minimal sample
+            sample_indices = np.random.choice(n, size=min_samples, replace=False)
+            C_sample = np.vstack([C[i] for i in sample_indices])
+            d_sample = np.vstack([d[i] for i in sample_indices])
+            # Solve for t_X candidate
+            try:
+                t_X_candidate, _, _, _ = lstsq(C_sample, d_sample, check_finite=False)
+            except np.linalg.LinAlgError:
+                continue  # Skip if singular
+            
+            lambda_candidate = retrive_scale_factor(
+                                np.stack([As[i] for i in sample_indices]), 
+                                np.stack([Bs[i] for i in sample_indices]), 
+                                R_X, 
+                                t_X_candidate)
+            # Evaluate inliers
+            current_inliers = []
+            for i in range(n):
+                left_side = As[i, :3, 3].reshape(3, 1)
+                right_side = R_X @ (lambda_candidate * Bs[i, :3, 3].reshape(3, 1)) + \
+                            t_X_candidate - As[i, :3, :3] @ t_X_candidate
+                error = np.linalg.norm(left_side - right_side)
+                if error < error_threshold:
+                    current_inliers.append(i)
+            
+            if len(current_inliers) > max_inliers:
+                max_inliers = len(current_inliers)
+                best_inliers = current_inliers
+
+        # Refit using all inliers
+        if len(best_inliers) >= threshold_num:
+            print(best_inliers)
+            C_inliers = np.vstack([C[i] for i in best_inliers])
+            d_inliers = np.vstack([d[i] for i in best_inliers])
+            t_X, residues, _, s = lstsq(C_inliers, d_inliers, check_finite=False)
+    if t_X is None:
+        # Use all data to solve for t_X
+        # Solve the linear system C * t_X = d
+        C_stack = np.vstack(C)
+        d_stack = np.vstack(d)
+        try:
+            t_X, residues, _, s = lstsq(C_stack, d_stack, check_finite=False)
+        except np.linalg.LinAlgError:
+            raise ValueError("Linear system could not be solved.")
+    lambda_ = retrive_scale_factor(As, Bs, R_X, t_X)
+
+    return R_X, t_X.flatten(), lambda_
+
+def retrive_rotation(As: np.ndarray, Bs: np.ndarray):
+    n = As.shape[0]
     M = np.zeros((3, 3), dtype=np.float64)
     for i in range(n):
         # Extract the rotation matrices from A_i and B_i.
@@ -50,39 +128,15 @@ def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray):
         assert False, "Reflection detected. Adjusted the sign of the last row of Vt."
         Vt[-1, :] *= -1
         R_X = U @ Vt
+    return R_X
 
-    # Step 2: Compute the translation component t_X.
-    C = []
-    d = []
-    for i in range(n):
-        # Extract the translation vectors from A_i and B_i.
-        tA_i = As[i, :3, 3].reshape(3, 1)
-        tB_i = Bs[i, :3, 3].reshape(3, 1)
-
-        # Construct the skew-symmetric matrix for tB_i (denoted as tB_i^).
-        tB_skew = skew(tB_i)
-        # Compute C_i and d_i.
-        RA_i = As[i, :3, :3]
-        Ci = tB_skew @ R_X.T @ (np.eye(3, dtype=np.float64) - RA_i)
-        di = tB_skew @ R_X.T @ tA_i
-        C.append(Ci)
-        d.append(di.reshape(-1, 1))  # Ensure the vector is a column vector.
-
-    # Form the linear system: C_stack @ t_X = d_stack.
-    C_stack = np.vstack(C)
-    d_stack = np.vstack(d)
-    t_X, residues, _, s = lstsq(C_stack, d_stack, check_finite=False)
-    print("<>" * 20)
-    print("The singular values are: ", s)
-    print(f"The residues for tx is: {residues}")
-    print("<>" * 20)
-    # t_X_, _, _ = minimize_L1_norm(C_stack, d_stack)
-    # t_X_ = t_X_.reshape(3, 1)
-    # print("<>" * 20)
-    # print(f"The residues for tx_ is: {np.linalg.norm(C_stack @ t_X_ - d_stack)**2}")
-    # print("<>" * 20)
-
-    # Step 3: Compute the scale factor lambda.
+def retrive_scale_factor(As: np.ndarray, Bs: np.ndarray, 
+                         R_X: np.ndarray, t_X: np.ndarray):
+    """
+    Compute the scale factor lambda based on the provided As, Bs, R_X, and t_X.
+    This function is used to compute the scale factor after obtaining R_X and t_X.
+    """
+    n = As.shape[0]
     lambda_sum = 0.0
     for i in range(n):
         RA_i = As[i, :3, :3]
@@ -93,21 +147,14 @@ def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray):
         denominator = np.linalg.norm(tB_i) ** 2
         assert denominator != 0, "Denominator should not be zero"
         lambda_i = numerator.item() / denominator
-        ############################# for debugging #############################
-        print("Debuging: lambda_i")
-        print(lambda_i)
-        ############################# for debugging #############################
         lambda_sum += lambda_i
 
-    lambda_ = lambda_sum / n
-
-    return R_X, t_X.flatten(), lambda_
-
+    return lambda_sum / n
 
 # Example usage.
 if __name__ == "__main__":
     # Generate example SE(4) matrices (identity matrices).
-    n = 5
+    n = 10
     As = np.tile(np.eye(4), (n, 1, 1))  # Shape: (n, 4, 4)
     Bs = np.tile(np.eye(4), (n, 1, 1))  # Shape: (n, 4, 4)
 
