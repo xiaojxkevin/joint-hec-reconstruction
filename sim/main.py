@@ -82,7 +82,9 @@ class HandEyeCalibrationSimulator:
         self.size = config["size"]
         self.max_samples = config["max_sample"]
         self.SHAPENET_PATH = "/mnt/data/ShapeNetCoreV2/data"
-        self.categories = sorted(os.listdir(self.SHAPENET_PATH))
+        # self.categories = sorted(os.listdir(self.SHAPENET_PATH))
+        self.categories = config["categories"]
+        self.use_chessboard = config["use_chessboard"]
         self.K = None
         self.ground_plane = None
         self.mesh_objects: List[bproc.types.MeshObject] = []
@@ -106,7 +108,10 @@ class HandEyeCalibrationSimulator:
 
         # Create ground plane
         self.ground_plane, chessboard = self.create_basic_scene()
-        self.mesh_objects.append(chessboard)
+        if chessboard is not None:
+            self.mesh_objects.append(chessboard)
+        else:
+            self.num_objects += 2
 
         # Create objects
         for _ in range(self.num_objects):
@@ -114,9 +119,7 @@ class HandEyeCalibrationSimulator:
             if obj is not None:
                 self.mesh_objects.append(obj)
         print("<>" * 20)
-        print(
-            f"Finished loading {len(self.mesh_objects) - 1} objects"
-        )  # Do not count the chessboard
+        print(f"Finished loading {len(self.mesh_objects)} objects")
 
         # Add multiple light sources to reduce shadows
         self.setup_lighting()
@@ -131,19 +134,21 @@ class HandEyeCalibrationSimulator:
         ground_plane.replace_materials(ground_material)
 
         # place a chessboard
-        chessboard = bproc.loader.load_obj("./chess.obj")[0]
-        bounding_box = chessboard.get_bound_box()
-        min_x, min_y, min_z = np.min(bounding_box, axis=0)
-        max_x, max_y, max_z = np.max(bounding_box, axis=0)
-        width = max_x - min_x
-        length = max_z - min_z
-        # Rescaling
-        current_max_dimension = max(width, length)
-        required_scale = 0.8 / current_max_dimension
-        chessboard.set_scale([required_scale, required_scale, required_scale])
-        chessboard.set_rotation_euler([0, 0, np.pi / 2])
-        # print(chessboard.get_bound_box())
-        # print(chessboard.get_rotation_mat())
+        chessboard = None
+        if self.use_chessboard:
+            chessboard = bproc.loader.load_obj("./chess.obj")[0]
+            bounding_box = chessboard.get_bound_box()
+            min_x, min_y, min_z = np.min(bounding_box, axis=0)
+            max_x, max_y, max_z = np.max(bounding_box, axis=0)
+            width = max_x - min_x
+            length = max_z - min_z
+            # Rescaling
+            current_max_dimension = max(width, length)
+            required_scale = 0.8 / current_max_dimension
+            chessboard.set_scale([required_scale, required_scale, required_scale])
+            chessboard.set_rotation_euler([0, 0, np.pi / 2])
+            # print(chessboard.get_bound_box())
+            # print(chessboard.get_rotation_mat())
 
         return ground_plane, chessboard
 
@@ -317,8 +322,8 @@ class HandEyeCalibrationSimulator:
             poi: Point of interest to look at.
         """
         # Get ellipse parameters from camera_pose_params or use defaults
-        radius = self.size + 0.2
-        height = self.size * 2.5
+        radius = self.size + 0.5
+        height = self.size * 2.0
         center = poi.copy()
 
         # Generate evenly spaced angles
@@ -330,10 +335,10 @@ class HandEyeCalibrationSimulator:
             x = center[0] + radius * np.cos(angle)
             y = center[1] + radius * np.sin(angle)
             z = height
-            location = np.array([x, y, z]) + np.random.uniform(-0.1, 0.1, 3)
+            location = np.array([x, y, z]) + np.random.uniform(-0.3, 0.3, 3)
 
             # Random in-plane rotation for variety
-            max_deg = 60  # Limit in-plane rotation to avoid extreme angles
+            max_deg = 90  # Limit in-plane rotation to avoid extreme angles
             inplane_rot = np.random.uniform(-np.radians(max_deg), np.radians(max_deg))
 
             # Add camera pose if it passes all checks
