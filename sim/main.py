@@ -108,10 +108,7 @@ class HandEyeCalibrationSimulator:
 
         # Create ground plane
         self.ground_plane, chessboard = self.create_basic_scene()
-        if chessboard is not None:
-            self.mesh_objects.append(chessboard)
-        else:
-            self.num_objects += 1
+        self.mesh_objects.append(chessboard)
 
         # Create objects
         while True:
@@ -326,8 +323,8 @@ class HandEyeCalibrationSimulator:
             poi: Point of interest to look at.
         """
         # Get ellipse parameters from camera_pose_params or use defaults
-        radius = self.size + 0.6
-        height = self.size * 2.0
+        radius = self.size + 0.2
+        height = self.size * 2.5
         center = poi.copy()
 
         # Generate evenly spaced angles
@@ -342,6 +339,7 @@ class HandEyeCalibrationSimulator:
             location = np.array([x, y, z]) + np.random.uniform(-0.4, 0.4, 3)
 
             # Random in-plane rotation for variety
+            max_deg = 90  # Limit in-plane rotation to avoid extreme angles
             max_deg = 90  # Limit in-plane rotation to avoid extreme angles
             inplane_rot = np.random.uniform(-np.radians(max_deg), np.radians(max_deg))
 
