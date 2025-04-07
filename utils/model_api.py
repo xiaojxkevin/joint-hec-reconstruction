@@ -16,13 +16,13 @@ sys.path.append(mast3r_local_dir)
 sys.path.append(project_folder)
 
 from mast3r.colmap.mapping import (
-    kapture_import_image_folder_or_list,
     run_mast3r_matching,
 )
 from mast3r.image_pairs import make_pairs
 from mast3r.model import AsymmetricMASt3R
 from dust3r.utils.image import load_images
 from utils.colmap_utils import (
+    kapture_import_image_folder_or_list,
     pycolmap_run_mapper,
     extract_and_save_correspondences,
     process_colmap_data,
@@ -77,7 +77,7 @@ def run_mast3r(
     # Prepare image pairs for matching
     pairs = make_pairs(imgs, scene_graph="complete", symmetrize=True)
     kdata = kapture_import_image_folder_or_list(
-        (input_dir, img_relpath), use_single_camera=True
+        (input_dir, img_relpath), camera_matrix=intrinsics
     )
     image_names = kdata.records_camera.data_list()
     image_pairs = [
@@ -131,7 +131,8 @@ def run_mast3r(
     if os.path.isdir(recon_path):
         shutil.rmtree(recon_path)
     os.makedirs(recon_path, exist_ok=True)
-    pycolmap_run_mapper(db_path, recon_path, input_dir)
+    opt_K = True if intrinsics is None else False
+    pycolmap_run_mapper(db_path, recon_path, input_dir, opt_K)
 
     ############################################ Save results
     # Load the reconstruction results from COLMAP

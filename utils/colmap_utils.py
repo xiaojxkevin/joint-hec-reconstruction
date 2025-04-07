@@ -2,9 +2,66 @@ import os
 import numpy as np
 import pycolmap
 import json
+import kapture
+from kapture.utils.paths import path_secure
+from typing import Union, Tuple, List, Optional
+import os.path as path
+import PIL
+import PIL.Image
 
 
-def pycolmap_run_mapper(colmap_db_path, recon_path, image_root_path):
+def kapture_import_image_folder_or_list(
+    images_path: Union[str, Tuple[str, List[str]]],
+    camera_matrix: Optional[np.ndarray] = None,
+) -> kapture.Kapture:
+    """Modified to use known camera intrinsics."""
+
+    images = kapture.RecordsCamera()
+    if isinstance(images_path, str):
+        images_root = images_path
+        file_list = [
+            path.relpath(path.join(dirpath, filename), images_root)
+            for dirpath, dirs, filenames in os.walk(images_root)
+            for filename in filenames
+        ]
+        file_list = sorted(file_list)
+    else:
+        images_root, file_list = images_path
+
+    sensors = kapture.Sensors()
+    try:
+        with PIL.Image.open(path.join(images_root, file_list[0])) as im:
+            width, height = im.size
+    except (OSError, PIL.UnidentifiedImageError):
+        raise RuntimeError(f"Invalid image file {file_list[0]}")
+
+    if camera_matrix is not None:
+        assert camera_matrix.shape == (
+            3,
+            3,
+        ), f"Camera matrix shape {camera_matrix.shape}"
+        fx, fy = camera_matrix[0, 0], camera_matrix[1, 1]
+        cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
+        model_params = [width, height, fx, fy, cx, cy]
+        camera_type = kapture.CameraType.PINHOLE
+    else:
+        model_params = [width, height]
+        camera_type = kapture.CameraType.UNKNOWN_CAMERA
+
+    camera_id = "sensor"
+    if camera_id not in sensors:
+        sensors[camera_id] = kapture.Camera(camera_type, model_params)
+
+    for n, filename in enumerate(file_list):
+        images[(n, camera_id)] = path_secure(filename)
+
+    return kapture.Kapture(sensors=sensors, records_camera=images)
+
+
+def pycolmap_run_mapper(
+    colmap_db_path: str, recon_path: str, image_root_path: str, opt_K: bool
+):
+    """when opt_K is true, we optimize the camera intrinsics during mapping"""
     print("<>" * 20)
     print("Running COLMAP mapper")
     # For more details on options, see:
@@ -13,27 +70,31 @@ def pycolmap_run_mapper(colmap_db_path, recon_path, image_root_path):
         database_path=colmap_db_path,
         image_path=image_root_path,
         output_path=recon_path,
-        options=pycolmap.IncrementalPipelineOptions({
-            "multiple_models": False,
-            "extract_colors": True,
-            "ba_local_max_refinements": 5,
-            "ba_global_max_refinements": 10
-        })
+        options=pycolmap.IncrementalPipelineOptions(
+            {
+                "multiple_models": False,
+                "ba_refine_focal_length": opt_K,
+                "ba_refine_extra_params": opt_K,
+                "extract_colors": True,
+                "ba_local_max_refinements": 5,
+                "ba_global_max_refinements": 10,
+            }
+        ),
     )
 
 
 def extract_and_save_correspondences(reconstruction_path: str, output_file: str):
     """
     Extract 2D-3D correspondences from a COLMAP reconstruction and save them to a file.
-    
+
     Args:
         reconstruction_path (str): Path to the COLMAP reconstruction folder.
         output_file (str): File path to save the correspondences.
-    
+
     Returns:
         dict: A dictionary containing the correspondence information.
     """
-    
+
     # Load the reconstruction data
     # https://colmap.github.io/pycolmap/pycolmap.html#pycolmap.Reconstruction
     reconstruction = pycolmap.Reconstruction(reconstruction_path)
@@ -41,14 +102,10 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
         raise RuntimeError(f"Failed to load reconstruction from {reconstruction_path}")
     print("<>" * 20)
     print(reconstruction.summary())
-    
+
     # Dictionary to store all correspondences
-    correspondences = {
-        "cameras": {},
-        "images": {},
-        "points3D": {}
-    }
-    
+    correspondences = {"cameras": {}, "images": {}, "points3D": {}}
+
     # Extract camera parameters
     # In most cases we just use a single camera, thus just ignore the for loop
     for camera_id, camera in reconstruction.cameras.items():
@@ -61,10 +118,10 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
             "intrinsics": K.tolist(),
         }
         break
-    
+
     # 3D points
     for i, (point3D_id, point3D) in enumerate(reconstruction.points3D.items()):
-        correspondences["points3D"][int(point3D_id)] = { 
+        correspondences["points3D"][int(point3D_id)] = {
             "sorted_id": i,
             "xyz": point3D.xyz.tolist(),
             "color": point3D.color.tolist(),
@@ -81,7 +138,7 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
         cam_from_world = image.cam_from_world.matrix
         if callable(cam_from_world):
             cam_from_world = cam_from_world()
-        
+
         # Extract 2D points and their corresponding 3D points
         pts2d_indices, pts3d_indices = [], []
         for point2D_idx, point2D in enumerate(image.points2D):
@@ -93,7 +150,9 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
                 pts2d_indices.append(pts2d_idx)
                 pts3d_indices.append(correspondences["points3D"][pt_id]["sorted_id"])
                 pts2d_idx += 1
-        assert len(pts2d_indices) == len(pts3d_indices), f"Length mismatch: {len(pts2d_indices)} != {len(pts3d_indices)}"
+        assert len(pts2d_indices) == len(
+            pts3d_indices
+        ), f"Length mismatch: {len(pts2d_indices)} != {len(pts3d_indices)}"
         correspondences["images"][int(image_id) - 1] = {
             "wolrd_to_cam": cam_from_world.tolist(),
             "pts2d_indices": pts2d_indices,
@@ -102,16 +161,16 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
 
     # 2D points
     correspondences["points2D"] = points2D
-    
+
     # Save the correspondences dictionary to a file
     with open(output_file, "w") as f:
         json.dump(correspondences, f, indent=2)
-    
+
     print(f"Saved correspondences to {output_file}")
     print(f"Total images: ", len(correspondences["images"]))
     print(f"Total 2D points: ", len(correspondences["points2D"]))
     print(f"Total 3D points: ", len(correspondences["points3D"]))
-    
+
     return correspondences
 
 
@@ -139,39 +198,41 @@ def process_colmap_data(correspondences):
     # np.save("tmp_point_cloud.npy", points3D)
     print(f"Saved point cloud data with shape {points3D.shape}")
     print("Point cloud coordinates are represented in the world coordinate system")
-    
+
     # Save 3D-2D correspondences
     images_dict = correspondences["images"]
     world2cam_poses = []
     visibility = {}
     for image_id in sorted(images_dict.keys()):
         img_info = correspondences["images"][image_id]
-        
+
         # Save eye poses
         mat = np.eye(4)
         mat[:3, :] = np.array(img_info["wolrd_to_cam"]).reshape(3, 4)
         world2cam_poses.append(mat)
-        
+
         visibility[image_id] = {
             "pts2d_indices": img_info["pts2d_indices"],
-            "pts3d_indices": img_info["pts3d_indices"]
+            "pts3d_indices": img_info["pts3d_indices"],
         }
 
     return K, np.asarray(world2cam_poses), points3D, points2D, visibility
 
+
 if __name__ == "__main__":
     # Example usage
-    reconstruction_folder = "results/0318/colmap/reconstruction/0"
+    reconstruction_folder = "results/easyscene_10/colmap/reconstruction/0"
     output_file = "./colmap_correspondences.json"
-    
+
     # Extract and save correspondences
-    correspondences = extract_and_save_correspondences(reconstruction_folder, output_file)
-    
+    correspondences = extract_and_save_correspondences(
+        reconstruction_folder, output_file
+    )
+
     # Process the COLMAP data
     K, w2c, points3D, points2D, visibility = process_colmap_data(correspondences)
-    
+
     print("Intrinsic matrix K:\n", K)
     print("World-to-camera matrices shape:", w2c.shape)
     print("Point cloud data shape:", points3D.shape)
     print("2D points shape:", points2D.shape)
-
