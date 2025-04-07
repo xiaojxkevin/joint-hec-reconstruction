@@ -107,9 +107,10 @@ class HandEyeCalibrationSimulator:
         print(self.K)
 
         # Create ground plane
-        self.ground_plane, chessboard = self.create_basic_scene()
+        self.ground_plane, chessboard, protective_box = self.create_basic_scene()
         if chessboard is not None:
             self.mesh_objects.append(chessboard)
+            self.mesh_objects.append(protective_box)
         else:
             self.num_objects += 1
 
@@ -136,7 +137,7 @@ class HandEyeCalibrationSimulator:
         ground_plane.replace_materials(ground_material)
 
         # place a chessboard
-        chessboard = None
+        chessboard, protective_box = None, None
         if self.use_chessboard:
             chessboard = bproc.loader.load_obj("./chess.obj")[0]
             bounding_box = chessboard.get_bound_box()
@@ -146,13 +147,38 @@ class HandEyeCalibrationSimulator:
             length = max_z - min_z
             # Rescaling
             current_max_dimension = max(width, length)
+            # The chessboard has 7x8 grids, let's make the the size of each gride to 0.1
             required_scale = 0.8 / current_max_dimension
             chessboard.set_scale([required_scale, required_scale, required_scale])
             chessboard.set_rotation_euler([0, 0, np.pi / 2])
-            # print(chessboard.get_bound_box())
-            # print(chessboard.get_rotation_mat())
 
-        return ground_plane, chessboard
+            updated_bounding_box = chessboard.get_bound_box()
+            min_x, min_y, min_z = np.min(updated_bounding_box, axis=0)
+            max_x, max_y, max_z = np.max(updated_bounding_box, axis=0)
+
+            # Create an invisible box slightly larger than the chessboard's footprint
+            # and positioned above it
+            box_height = 0.8
+            protective_box = bproc.object.create_primitive("CUBE")
+
+            # Scale the box to match chessboard dimensions with a small margin
+            margin = 0.01  # Small margin around the edges
+            box_width = (max_x - min_x) + 2 * margin
+            box_length = (max_z - min_z) + 2 * margin
+            protective_box.set_scale([box_width / 2, box_length / 2, box_height / 2])
+
+            # Position the box above the chessboard
+            center_x = (min_x + max_x) / 2
+            center_z = (min_z + max_z) / 2
+            box_y_position = (
+                max_y + box_height / 2
+            )  # Place box directly above chessboard
+            protective_box.set_location([center_x, box_y_position, center_z])
+
+            protective_box.hide(True)
+            protective_box.enable_rigidbody(True, collision_shape="BOX", mass=0)
+
+        return ground_plane, chessboard, protective_box
 
     def load_single_object(self):
         # Load a single object from ShapeNet for the scene
@@ -304,9 +330,10 @@ class HandEyeCalibrationSimulator:
             tries += 1
 
             # Sample random camera location above objects
+            offset = 0.8
             location = np.random.uniform(
-                [-self.size, -self.size, self.size - 0.2],
-                [self.size, self.size, self.size + 0.2],
+                [-self.size - offset, -self.size - offset, self.size * 2.0 - 0.2],
+                [self.size + offset, self.size + offset, self.size * 2.0 + 0.2],
             )
 
             # Random in-plane rotation (around viewing direction)
