@@ -178,6 +178,15 @@ def process_colmap_data(correspondences):
     """
     Returns the camera intrinsic matrix, world-to-camera transformation matrices, 3D points, 2D points, and visibility.
     """
+    if isinstance(correspondences, str):
+        # Load from file if a string path is provided
+        with open(correspondences, "r") as f:
+            correspondences = json.load(
+                f,
+                object_hook=lambda d: {
+                    int(k) if k.isdigit() else k: v for k, v in d.items()
+                },
+            )
     # Extract the primary camera intrinsics
     K = np.array(correspondences["cameras"]["intrinsics"]).reshape(3, 3)
     print("Primary camera intrinsic matrix:\n", K)
@@ -231,6 +240,7 @@ if __name__ == "__main__":
 
     # Process the COLMAP data
     K, w2c, points3D, points2D, visibility = process_colmap_data(correspondences)
+    print(visibility.keys())
 
     print("Intrinsic matrix K:\n", K)
     print("World-to-camera matrices shape:", w2c.shape)

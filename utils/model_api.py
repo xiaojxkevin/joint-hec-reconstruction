@@ -48,7 +48,10 @@ def run_mast3r(
     image_size: int = 512,
     device: str = "cuda",
 ):
-    """ """
+    """
+    The input intrinsics (optional) belong to the original camera.
+    And the output K also belongs to the original camera's parameters.
+    """
     recon_path = os.path.join(output_dir, "reconstruction")
     reconstruction_folder = os.path.join(recon_path, "0")
     correspondence_file = os.path.join(output_dir, "colmap_raw.json")
