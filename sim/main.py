@@ -82,7 +82,9 @@ class HandEyeCalibrationSimulator:
         self.size = config["size"]
         self.max_samples = config["max_sample"]
         self.SHAPENET_PATH = "/mnt/data/ShapeNetCoreV2/data"
-        self.categories = sorted(os.listdir(self.SHAPENET_PATH))
+        # self.categories = sorted(os.listdir(self.SHAPENET_PATH))
+        self.categories = config["categories"]
+        self.use_chessboard = config["use_chessboard"]
         self.K = None
         self.ground_plane = None
         self.mesh_objects: List[bproc.types.MeshObject] = []
@@ -106,17 +108,20 @@ class HandEyeCalibrationSimulator:
 
         # Create ground plane
         self.ground_plane, chessboard = self.create_basic_scene()
-        self.mesh_objects.append(chessboard)
+        if chessboard is not None:
+            self.mesh_objects.append(chessboard)
+        else:
+            self.num_objects += 1
 
         # Create objects
-        for _ in range(self.num_objects):
+        while True:
             obj = self.load_single_object()
             if obj is not None:
                 self.mesh_objects.append(obj)
+            if len(self.mesh_objects) >= self.num_objects:
+                break
         print("<>" * 20)
-        print(
-            f"Finished loading {len(self.mesh_objects) - 1} objects"
-        )  # Do not count the chessboard
+        print(f"Finished loading {len(self.mesh_objects)} objects")
 
         # Add multiple light sources to reduce shadows
         self.setup_lighting()
@@ -131,19 +136,21 @@ class HandEyeCalibrationSimulator:
         ground_plane.replace_materials(ground_material)
 
         # place a chessboard
-        chessboard = bproc.loader.load_obj("./chess.obj")[0]
-        bounding_box = chessboard.get_bound_box()
-        min_x, min_y, min_z = np.min(bounding_box, axis=0)
-        max_x, max_y, max_z = np.max(bounding_box, axis=0)
-        width = max_x - min_x
-        length = max_z - min_z
-        # Rescaling
-        current_max_dimension = max(width, length)
-        required_scale = 0.8 / current_max_dimension
-        chessboard.set_scale([required_scale, required_scale, required_scale])
-        chessboard.set_rotation_euler([0, 0, np.pi / 2])
-        # print(chessboard.get_bound_box())
-        # print(chessboard.get_rotation_mat())
+        chessboard = None
+        if self.use_chessboard:
+            chessboard = bproc.loader.load_obj("./chess.obj")[0]
+            bounding_box = chessboard.get_bound_box()
+            min_x, min_y, min_z = np.min(bounding_box, axis=0)
+            max_x, max_y, max_z = np.max(bounding_box, axis=0)
+            width = max_x - min_x
+            length = max_z - min_z
+            # Rescaling
+            current_max_dimension = max(width, length)
+            required_scale = 0.8 / current_max_dimension
+            chessboard.set_scale([required_scale, required_scale, required_scale])
+            chessboard.set_rotation_euler([0, 0, np.pi / 2])
+            # print(chessboard.get_bound_box())
+            # print(chessboard.get_rotation_mat())
 
         return ground_plane, chessboard
 
@@ -172,8 +179,8 @@ class HandEyeCalibrationSimulator:
         # Add the object to the scene
         from blenderproc.python.utility.CollisionUtility import CollisionUtility
 
-        max_attempts = 20
-        is_valid = True
+        max_attempts = 8
+        is_valid = False
         for attempt in range(max_attempts):
             position_x = np.random.uniform(-self.size, self.size)
             position_y = np.random.uniform(-self.size, self.size)
@@ -187,16 +194,18 @@ class HandEyeCalibrationSimulator:
                 obj=obj,
                 bvh_cache=None,
                 objects_to_check_against=self.mesh_objects,
-                list_of_objects_with_no_inside_check=[self.ground_plane],
+                list_of_objects_with_no_inside_check=[],
             )
             if is_valid:
                 break
 
         if is_valid:
             print(
-                f"Placed object at position [{position_x:.2f}, {position_y:.2f}, {position_z:.2f}] with rotation {rotation_z:.2f}"
+                f"Placed object at position [{position_x:.2f}, {position_y:.2f}, {position_z:.2f}]."
             )
             return obj
+        print("*************Failed to place object after maximum attempts*************")
+        return None  # None if the object could not be placed after max attempts
 
     def setup_lighting(self):
         """Set up a comprehensive lighting system to minimize shadows."""
@@ -234,7 +243,7 @@ class HandEyeCalibrationSimulator:
         corner_light1 = bproc.types.Light()
         corner_light1.set_type("POINT")
         corner_light1.set_location([5, 5, 5])
-        corner_light1.set_energy(500)
+        corner_light1.set_energy(300)
 
         corner_light2 = bproc.types.Light()
         corner_light2.set_type("POINT")
@@ -258,7 +267,7 @@ class HandEyeCalibrationSimulator:
         bounce_light.set_type("AREA")
         bounce_light.set_location([0, 0, 0.1])
         bounce_light.set_rotation_euler([np.pi, 0, 0])  # Point upward
-        bounce_light.set_energy(200)
+        bounce_light.set_energy(100)
         bounce_light.set_scale([4, 4, 1])  # Wide area light
 
     def generate_camera_poses(self):
@@ -317,8 +326,8 @@ class HandEyeCalibrationSimulator:
             poi: Point of interest to look at.
         """
         # Get ellipse parameters from camera_pose_params or use defaults
-        radius = self.size + 0.2
-        height = self.size * 2.5
+        radius = self.size + 0.6
+        height = self.size * 2.0
         center = poi.copy()
 
         # Generate evenly spaced angles
@@ -330,10 +339,10 @@ class HandEyeCalibrationSimulator:
             x = center[0] + radius * np.cos(angle)
             y = center[1] + radius * np.sin(angle)
             z = height
-            location = np.array([x, y, z]) + np.random.uniform(-0.1, 0.1, 3)
+            location = np.array([x, y, z]) + np.random.uniform(-0.4, 0.4, 3)
 
             # Random in-plane rotation for variety
-            max_deg = 60  # Limit in-plane rotation to avoid extreme angles
+            max_deg = 90  # Limit in-plane rotation to avoid extreme angles
             inplane_rot = np.random.uniform(-np.radians(max_deg), np.radians(max_deg))
 
             # Add camera pose if it passes all checks
@@ -473,8 +482,9 @@ class HandEyeCalibrationSimulator:
     def render_and_save(self):
         """Render the scene and save all data in the required format."""
         # Set renderer parameters for better quality
-        bproc.renderer.set_noise_threshold(0.05)
+        bproc.renderer.set_noise_threshold(0.01)
         bproc.renderer.set_max_amount_of_samples(self.max_samples)
+        # bproc.renderer.set_denoiser("")
 
         # Render the scene
         data = bproc.renderer.render()

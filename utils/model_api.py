@@ -17,7 +17,7 @@ sys.path.append(project_folder)
 
 from mast3r.colmap.mapping import (
     kapture_import_image_folder_or_list,
-    run_mast3r_matching
+    run_mast3r_matching,
 )
 from mast3r.image_pairs import make_pairs
 from mast3r.model import AsymmetricMASt3R
@@ -25,48 +25,41 @@ from dust3r.utils.image import load_images
 from utils.colmap_utils import (
     pycolmap_run_mapper,
     extract_and_save_correspondences,
-    process_colmap_data
+    process_colmap_data,
 )
 from utils.math_op import inv
 
 
-def get_img_lists(img_dir: str, num_imgs: int) -> list:
+def get_img_lists(img_dir: str, step: int) -> list:
     # Return a sorted list of image paths (png, jpg, jpeg) limited to num_imgs
     return [
         os.path.join(img_dir, f)
         for f in sorted(os.listdir(img_dir))
         if re.match(r".*\.(png|jpg|jpeg)$", f)
-    ][:num_imgs]
+    ][::step]
 
-def run_mast3r(input_dir: str,
-               output_dir: str,
-               model_path: str,
-               num_imgs: int = 8,
-               intrinsics: np.ndarray = None,
-               image_size: int = 512,
-               device: str = "cuda"):
-    """
-    Runs the MASt3R pipeline to return camera intrinsics, cam2world transformations, and 3D points.
-    
-    Args:
-        input_dir (str): Directory containing input images.
-        output_dir (str): Directory to save output files.
-        model_path (str): Path to the pre-trained MASt3R model.
-        num_imgs (int, optional): Number of images to process. Defaults to 8.
-        image_size (int, optional): Size to which images will be resized. Defaults to 512.
-        device (str, optional): Device to run the model on ("cuda" or "cpu"). Defaults to "cuda".
-    
-    Returns:
-        tuple:
-    """
+
+def run_mast3r(
+    input_dir: str,
+    output_dir: str,
+    model_path: str,
+    step: int,
+    intrinsics: np.ndarray = None,
+    image_size: int = 512,
+    device: str = "cuda",
+):
+    """ """
     recon_path = os.path.join(output_dir, "reconstruction")
     reconstruction_folder = os.path.join(recon_path, "0")
     correspondence_file = os.path.join(output_dir, "colmap_raw.json")
     if os.path.exists(correspondence_file):
         print("-------- Loading existing correspondences --------")
-        correspondence_data = extract_and_save_correspondences(reconstruction_folder, 
-                                                           correspondence_file)
-        K, world2cam, points3D, points2D, visibility = process_colmap_data(correspondence_data)
+        correspondence_data = extract_and_save_correspondences(
+            reconstruction_folder, correspondence_file
+        )
+        K, world2cam, points3D, points2D, visibility = process_colmap_data(
+            correspondence_data
+        )
         cam2world = np.asarray([inv(p) for p in world2cam])
         return K, cam2world, points3D, points2D, visibility
 
@@ -77,21 +70,18 @@ def run_mast3r(input_dir: str,
     model = AsymmetricMASt3R.from_pretrained(model_path).to(device)
 
     # Load images and generate a kapture data structure
-    img_path_lists = get_img_lists(input_dir, num_imgs)
-    img_relpath = [
-        os.path.relpath(filename, input_dir)
-        for filename in img_path_lists
-    ]
+    img_path_lists = get_img_lists(input_dir, step)
+    img_relpath = [os.path.relpath(filename, input_dir) for filename in img_path_lists]
     imgs = load_images(img_path_lists, size=image_size)
-    
+
     # Prepare image pairs for matching
     pairs = make_pairs(imgs, scene_graph="complete", symmetrize=True)
-    kdata = kapture_import_image_folder_or_list((input_dir, img_relpath), 
-                                                use_single_camera=True)
+    kdata = kapture_import_image_folder_or_list(
+        (input_dir, img_relpath), use_single_camera=True
+    )
     image_names = kdata.records_camera.data_list()
     image_pairs = [
-        (img_relpath[img1["idx"]], img_relpath[img2["idx"]])
-        for img1, img2 in pairs
+        (img_relpath[img1["idx"]], img_relpath[img2["idx"]]) for img1, img2 in pairs
     ]
 
     ############################################ Create COLMAP database
@@ -99,13 +89,15 @@ def run_mast3r(input_dir: str,
     if os.path.exists(db_path):
         os.remove(db_path)
     colmap_db = COLMAPDatabase.connect(db_path)
-    
+
     try:
         # Export kapture data to the COLMAP database
-        kapture_to_colmap(kapture_data=kdata, 
-                          kapture_dirpath=input_dir, 
-                          tar_handler=None, 
-                          database=colmap_db)
+        kapture_to_colmap(
+            kapture_data=kdata,
+            kapture_dirpath=input_dir,
+            tar_handler=None,
+            database=colmap_db,
+        )
         # Run MASt3R matching to generate image pairs for COLMAP
         colmap_image_pairs = run_mast3r_matching(
             model=model,
@@ -120,7 +112,7 @@ def run_mast3r(input_dir: str,
             pixel_tol=5,
             conf_thr=1.001,
             skip_geometric_verification=False,
-            min_len_track=3
+            min_len_track=3,
         )
         colmap_db.close()
     except Exception as e:
@@ -144,15 +136,20 @@ def run_mast3r(input_dir: str,
     ############################################ Save results
     # Load the reconstruction results from COLMAP
     # Extract and save correspondences between 2D and 3D points
-    correspondence_data = extract_and_save_correspondences(reconstruction_folder, 
-                                                           correspondence_file)
-    K, world2cam, points3D, points2D, visibility = process_colmap_data(correspondence_data)
+    correspondence_data = extract_and_save_correspondences(
+        reconstruction_folder, correspondence_file
+    )
+    K, world2cam, points3D, points2D, visibility = process_colmap_data(
+        correspondence_data
+    )
     cam2world = np.asarray([inv(p) for p in world2cam])
-    
+
     return K, cam2world, points3D, points2D, visibility
 
 
 if __name__ == "__main__":
-    run_mast3r(input_dir="./data/0318/imgs",
-               output_dir="./output/0318",
-               model_path="./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth")
+    run_mast3r(
+        input_dir="./data/0318/imgs",
+        output_dir="./output/0318",
+        model_path="./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+    )

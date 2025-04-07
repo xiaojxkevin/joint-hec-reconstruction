@@ -3,6 +3,7 @@ import os, torch
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import numpy as np
 import argparse
+import yaml
 from utils.model_api import run_mast3r
 import utils.geometric_util as geomu
 from utils.math_op import inv
@@ -10,7 +11,8 @@ from utils.calib import compute_As_Bs, solve_hand_eye_se3
 from utils.visual import vis_scene
 from utils.ba import run_hand_eye_bundle_adjustment
 
-def load_hand_poses(file_path: str, num: int) -> np.ndarray:
+
+def load_hand_poses(file_path: str, step: int) -> np.ndarray:
     """
     read transformations from hand to base from a TUM file
     """
@@ -19,29 +21,27 @@ def load_hand_poses(file_path: str, num: int) -> np.ndarray:
     if data.shape[1] != num_check:
         raise ValueError(f"Each line in the file should contain {num_check} elements.")
     hand_poses = geomu.tum2transformation(data)
-    return hand_poses[:num]
+    return hand_poses[::step]
 
 
 def jcr_run(
-    exp_name: str,
-    eef_path: str,
-    img_dir: str,
-    num_imgs: int,
-    intrinsics: np.ndarray,
-    save_dir: str,
-    model_path: str,
+    config: dict,
 ):
 
-    hand2base_poses = load_hand_poses(eef_path, num=num_imgs)
-    base2hand_poses = np.asarray([inv(pose) for pose in hand2base_poses], dtype=np.float64)
-    K, eye2obj_poses, points3D, points2D, visibility = run_mast3r(
-        input_dir=img_dir,
-        output_dir=os.path.join(save_dir, "colmap"),
-        model_path=model_path,
-        num_imgs=num_imgs,
-        intrinsics=intrinsics,
+    hand2base_poses = load_hand_poses(config["hand_path"], step=config["step"])
+    base2hand_poses = np.asarray(
+        [inv(pose) for pose in hand2base_poses], dtype=np.float64
     )
-    assert hand2base_poses.shape[0] == eye2obj_poses.shape[0], f"{hand2base_poses.shape[0]} != {eye2obj_poses.shape[0]}"
+    K, eye2obj_poses, points3D, points2D, visibility = run_mast3r(
+        input_dir=config["img_dir"],
+        output_dir=os.path.join(config["exp_dir"], "colmap"),
+        model_path=config["model_path"],
+        step=config["step"],
+        intrinsics=config["K"],
+    )
+    assert (
+        hand2base_poses.shape[0] == eye2obj_poses.shape[0]
+    ), f"{hand2base_poses.shape[0]} != {eye2obj_poses.shape[0]}"
     pts, rgb_colors, pts_errors = points3D[:, :3], points3D[:, 3:6], points3D[:, 6]
 
     As, Bs = compute_As_Bs(eye2obj_poses, hand2base_poses)
@@ -54,7 +54,9 @@ def jcr_run(
     T_eye2hand = np.eye(4, dtype=np.float64)
     T_eye2hand[:3, :3] = R_eye2hand
     T_eye2hand[:3, 3] = t_eye2hand
-    np.savetxt(f"{save_dir}/init_T_eye2hand.txt", T_eye2hand, fmt="%.6f")
+    np.savetxt(
+        os.path.join(config["exp_dir"], "init_T_eye2hand.txt"), T_eye2hand, fmt="%.6f"
+    )
 
     pts *= scale
     eye2obj_poses[:, :3, 3] *= scale
@@ -68,7 +70,7 @@ def jcr_run(
     # check for obj2base transformation
     print("<>" * 20)
     print("obj2base transformation:")
-    for idx in range(num_imgs):
+    for idx in range(config["num_imgs"]):
         print(eye2base_poses[idx] @ obj2eye_poses[idx])
     ############################# for debugging #############################
 
@@ -80,15 +82,21 @@ def jcr_run(
         hand2base_poses,
         pts_vis,
         pts_color_vis,
-        f"{save_dir}/init_{exp_name}_{num_imgs}.html",
+        os.path.join(config["exp_dir"], "init_scene.html"),
     )
 
     # Run bundle adjustment
-    print("----------------------- Run bundle adjustment ----------------------------------")
+    print(
+        "----------------------- Run bundle adjustment ----------------------------------"
+    )
     optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
         K, inv(T_eye2hand), base2hand_poses, pts_in_base, points2D, visibility
     )
-    np.savetxt(f"{save_dir}/ba_T_eye2hand.txt", optimized_eye2hand, fmt="%.6f")
+    np.savetxt(
+        os.path.join(config["exp_dir"], "ba_T_eye2hand.txt"),
+        optimized_eye2hand,
+        fmt="%.6f",
+    )
     eye2base_poses = hand2base_poses @ optimized_eye2hand
     pts_vis = optimized_points[::]
     vis_scene(
@@ -96,7 +104,7 @@ def jcr_run(
         hand2base_poses,
         pts_vis,
         pts_color_vis,
-        f"{save_dir}/ba_{exp_name}_{num_imgs}.html",
+        os.path.join(config["exp_dir"], "ba_scene.html"),
     )
 
     tensors_to_save = {
@@ -106,10 +114,9 @@ def jcr_run(
         "pts_in_base": optimized_points,
         "pts_colors": rgb_colors,
     }
-    saving_loc = os.path.join(save_dir, f"{exp_name}_{num_imgs}.pth")
-    torch.save(tensors_to_save, saving_loc)
+    torch.save(tensors_to_save, os.path.join(config["exp_dir"], "final.pth"))
     print("<>" * 20)
-    print(f"Results saved at {saving_loc}")
+    print(f"All results are saved.")
 
 
 def main():
@@ -118,44 +125,39 @@ def main():
     )
     parser.add_argument("--exp_name", type=str, required=True, help="Experiment name")
     parser.add_argument(
-        "--out_dir",
+        "--config_path",
         type=str,
-        default="./results",
-        help="Directory to save the results",
+        default="./config/calib.yaml",
+        help="Path to the config yaml file",
     )
     args = parser.parse_args()
+    with open(args.config_path, "r") as f:
+        config = yaml.safe_load(f)
 
-    save_dir = f"{args.out_dir}/{args.exp_name}"
-    if not os.path.exists(save_dir):
-        print(f"making {save_dir}")
-        os.makedirs(save_dir)
-
-    eef_path = f"./data/{args.exp_name}/hand_tum.txt"
-    img_dir = f"./data/{args.exp_name}/imgs"
-    model_path = "./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
-    intrinsic_path = f"./data/{args.exp_name}/intrinsics.txt"
-    if os.path.exists(intrinsic_path):
-        K = np.loadtxt(intrinsic_path, dtype=np.float64)
-    else:
-        K = None
-    num_imgs = 0
-    for filename in os.listdir(img_dir):
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in {".png", ".jpg", ".jpeg"}:
-            num_imgs += 1
-    # num_imgs = 2
-
-    saving_loc = os.path.join(save_dir, f"{args.exp_name}_{num_imgs}.pth")
-    print("Working on", saving_loc)
-    jcr_run(
-        exp_name=args.exp_name,
-        eef_path=eef_path,
-        img_dir=img_dir,
-        num_imgs=num_imgs,
-        intrinsics=K,
-        save_dir=save_dir,
-        model_path=model_path,
+    # Load data info
+    config["hand_path"] = os.path.join(
+        config["data_dir"], args.exp_name, "hand_tum.txt"
     )
+    config["img_dir"] = os.path.join(config["data_dir"], args.exp_name, "imgs")
+    intrinsic_path = os.path.join(config["data_dir"], args.exp_name, "intrinsics.txt")
+    config["K"] = (
+        np.loadtxt(intrinsic_path, dtype=np.float64)
+        if os.path.exists(intrinsic_path)
+        else None
+    )
+    num_imgs = len(os.listdir(config["img_dir"]))
+    config["num_imgs"] = (num_imgs - 1) // config["step"] + 1
+    print(f"Using {config['num_imgs']} images for calibration.")
+
+    # The folder to store the results of the experiment
+    config["exp_dir"] = os.path.join(
+        config["out_dir"], f"{args.exp_name}_{config['num_imgs']:02d}"
+    )
+    os.makedirs(config["exp_dir"], exist_ok=True)
+    print("Working on ", config["exp_dir"])
+
+    # Start joint calibration and reconstruction
+    jcr_run(config)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+out_dir: "./results"
+model_path: "./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+data_dir: "data"
+step: 1 # step size for sampling images
