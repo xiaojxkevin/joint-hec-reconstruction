@@ -1,9 +1,9 @@
 import numpy as np
+import scipy
 import scipy.sparse as sparse
 import scipy.sparse.linalg as linalg
 import time
 from typing import Dict, List, Tuple, Any
-
 from utils.math_op import inv, skew, transMat2Vec, vec2transMat
 
 
@@ -21,6 +21,7 @@ class HandEyeBundleAdjustment:
         pts3d_in_base: np.ndarray,
         pts2d: np.ndarray,
         visibility: np.ndarray,
+        max_it: int = 10,
     ):
         """
         Initialize the bundle adjustment solver.
@@ -52,8 +53,9 @@ class HandEyeBundleAdjustment:
         # Total parameters: 6 for hand2eye + 3 for each 3D point
         self.total_params = 6 + self.n_points * 3
 
-        # Huber threshold parameter (delta)
-        self.huber_delta = 1.0
+        # self.huber_delta = 1.0  # Huber loss threshold
+        # Max iterations for optimization
+        self.max_it = max_it
 
     def objective_function(self, params):
         """
@@ -209,27 +211,37 @@ class HandEyeBundleAdjustment:
                 @ R_hjb
             )  # shape: (N, 2, 3)
 
-            # For hand-eye transformation parameters (first 6 columns)
-            for point_idx in range(n_points_in_view):
-                for i in range(2):  # 2 rows per point (x and y residuals)
-                    for j in range(6):  # 6 hand-eye parameters
-                        row_ind[entry_idx] = residual_idx + point_idx * 2 + i
-                        col_ind[entry_idx] = j
-                        data[entry_idx] = J_xi[point_idx, i, j]
-                        entry_idx += 1
+            # Vectorized assignment for hand-eye parameters (J_xi)
+            n_entries_xi = n_points_in_view * 2 * 6
+            end_xi = entry_idx + n_entries_xi
+            if end_xi > max_entries:
+                raise ValueError("Pre-allocated arrays are too small.")
 
-            # For 3D point parameters
-            for local_idx, global_idx in enumerate(pts3d_indices):
-                for i in range(2):  # 2 rows per point (x and y residuals)
-                    for j in range(3):  # 3 coordinates per point
-                        row_ind[entry_idx] = residual_idx + local_idx * 2 + i
-                        col_ind[entry_idx] = (
-                            6 + global_idx * 3 + j
-                        )  # Offset by 6 for hand-eye params
-                        data[entry_idx] = J_pts[local_idx, i, j]
-                        entry_idx += 1
+            data[entry_idx:end_xi] = J_xi.reshape(-1)
+            row_ind[entry_idx:end_xi] = (
+                residual_idx + np.arange(n_points_in_view * 2)
+            ).repeat(6)
+            col_ind[entry_idx:end_xi] = np.tile(np.arange(6), n_points_in_view * 2)
+            entry_idx = end_xi
 
-            # Update residual index for the next view
+            # Vectorized assignment for 3D points (J_pts)
+            n_entries_pts = n_points_in_view * 2 * 3
+            end_pts = entry_idx + n_entries_pts
+            if end_pts > max_entries:
+                raise ValueError("Pre-allocated arrays are too small.")
+
+            row_ind_pts = (residual_idx + np.arange(n_points_in_view * 2)).repeat(3)
+            row_ind[entry_idx:end_pts] = row_ind_pts
+
+            global_indices = pts3d_indices
+            j_values_per_point = np.tile(np.arange(3), 2)
+            global_indices_expanded = global_indices.repeat(6)
+            j_values_all = np.tile(j_values_per_point, n_points_in_view)
+            col_ind_pts = 6 + 3 * global_indices_expanded + j_values_all
+            col_ind[entry_idx:end_pts] = col_ind_pts
+
+            data[entry_idx:end_pts] = J_pts.reshape(-1)
+            entry_idx = end_pts
             residual_idx += n_points_in_view * 2
 
         # Trim any unused pre-allocated space
@@ -244,18 +256,8 @@ class HandEyeBundleAdjustment:
 
         return jacobian
 
-    def custom_least_squares(self, max_iterations=50, ftol=1e-5, verbose=True):
-        """
-        Custom least squares implementation with Huber loss and analytical Jacobian.
-
-        Args:
-            max_iterations: Maximum number of iterations
-            ftol: Convergence tolerance on function value
-            verbose: Whether to print progress information
-
-        Returns:
-            Optimized parameters and optimization result information
-        """
+    def custom_least_squares(self, ftol=1e-6, lambda_=1e-2, verbose=True):
+        """ """
         # Initial parameters
         hand2eye_params = transMat2Vec(self.hand2eye)
         params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
@@ -264,12 +266,10 @@ class HandEyeBundleAdjustment:
         prev_cost = np.inf
 
         # Optimization loop
-        from tqdm import tqdm
-
-        for iteration in tqdm(range(max_iterations), desc="Optimization Progress"):
+        for iteration in range(self.max_it):
             # Compute residuals
             residuals = self.objective_function(params)
-            cost = np.sum(residuals**2)
+            cost = np.sqrt(np.sum(residuals**2))
 
             # Check convergence
             if np.abs(prev_cost - cost) < ftol:
@@ -279,50 +279,41 @@ class HandEyeBundleAdjustment:
                     )
                 break
 
-            start = time.time()
             # Compute analytical Jacobian
             jacobian = self.compute_analytical_jacobian(params)
-            end = time.time()
-            print(f"Jacobian computation time: {end - start:.6f} seconds")
 
-            start = time.time()
             # Compute normal equations: J^T @ J @ Δx = -J^T @ r
-            H = jacobian.T @ jacobian
-            g = -jacobian.T @ residuals
-            end = time.time()
-            print(f"H computation time: {end - start:.6f} seconds")
+            H: sparse.csc_matrix = jacobian.T @ jacobian
+            g: np.ndarray = -jacobian.T @ residuals
 
-            start = time.time()
-            # Solve normal equations with regularization for stability
-            lambda_reg = 1e-4  # Levenberg-Marquardt damping factor
+            # Solve the equation
             delta_params = linalg.spsolve(
-                H + lambda_reg * sparse.eye(self.total_params), g
+                H + lambda_ * sparse.eye(self.total_params), g
             )
-            end = time.time()
-            print(f"Solver time: {end - start:.6f} seconds")
+            lambda_ = max(1e-6, lambda_ * 0.5)
+            # TODO: use schur elimination
+            # B = H[:6, :6] + np.eye(6) * lambda_reg
+            # E = H[:6, 6:]
+            # C = H[6:, 6:].tocsc() + sparse.eye(self.n_points * 3) * lambda_reg
+            # g1 = g[:6]
+            # g2 = g[6:]
+            # inv_C = linalg.inv(C)
+            # delta_pose = scipy.linalg.solve(B - E @ inv_C @ E.T, g1 - E @ inv_C @ g2)
+            # delta_pts = linalg.spsolve(C, g2 - E.T @ delta_pose)
 
             # Update points
             params[6:] += delta_params[6:]
             # update pose
-            params[:6] = transMat2Vec(vec2transMat(delta_params[:6]) @ self.hand2eye)
+            params[:6] = transMat2Vec(
+                vec2transMat(delta_params[:6]) @ vec2transMat(params[:6])
+            )
 
-            if verbose and (iteration % 5 == 0 or iteration == max_iterations - 1):
+            if verbose and (iteration % 1 == 0 or iteration == self.max_it - 1):
                 print(f"Iteration {iteration}: cost = {cost:.6f}")
             prev_cost = cost
 
-        # Final evaluation
-        final_residuals = self.objective_function(params)
-        final_cost = np.sum(final_residuals**2)
-
-        if verbose:
-            print(f"Optimization completed.")
-            print(f"Final cost: {final_cost:.6f}")
-
         result = {
             "x": params,
-            "fun": final_residuals,
-            "cost": final_cost,
-            "success": True,
             "nit": iteration + 1,
         }
 
@@ -341,10 +332,10 @@ class HandEyeBundleAdjustment:
 
         # Compute initial cost
         initial_residuals = self.objective_function(initial_params)
-        initial_cost = np.sum(initial_residuals**2)
+        initial_cost = np.sqrt(np.sum(initial_residuals**2))
         print(f"Initial cost: {initial_cost:.6f}")
 
-        result = self.custom_least_squares(max_iterations=50, ftol=1e-5, verbose=True)
+        result = self.custom_least_squares(ftol=1e-6)
         optimized_params = result["x"]
 
         # Extract optimized parameters
@@ -355,7 +346,7 @@ class HandEyeBundleAdjustment:
 
         # Compute final cost
         final_residuals = self.objective_function(optimized_params)
-        final_cost = np.sum(final_residuals**2)
+        final_cost = np.sqrt(np.sum(final_residuals**2))
         print(f"Final cost: {final_cost:.6f}")
 
         return optimized_eye2hand, optimized_points
