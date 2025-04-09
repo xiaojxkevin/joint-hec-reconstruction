@@ -45,6 +45,7 @@ def kapture_import_image_folder_or_list(
         model_params = [width, height, fx, fy, cx, cy]
         camera_type = kapture.CameraType.PINHOLE
     else:
+        # TODO check the type of the camera
         model_params = [width, height]
         camera_type = kapture.CameraType.UNKNOWN_CAMERA
 
@@ -83,7 +84,7 @@ def pycolmap_run_mapper(
     )
 
 
-def extract_and_save_correspondences(reconstruction_path: str, output_file: str):
+def extract_and_save_correspondences(reconstruction_path: str, output_file: str | None):
     """
     Extract 2D-3D correspondences from a COLMAP reconstruction and save them to a file.
 
@@ -109,6 +110,7 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     # Extract camera parameters
     # In most cases we just use a single camera, thus just ignore the for loop
     for camera_id, camera in reconstruction.cameras.items():
+        print("*" * 50, "\n", camera, "\n", "*" * 50)
         K = np.eye(3)
         K[0, 0] = camera.focal_length_x
         K[1, 1] = camera.focal_length_y
@@ -163,8 +165,9 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str)
     correspondences["points2D"] = points2D
 
     # Save the correspondences dictionary to a file
-    with open(output_file, "w") as f:
-        json.dump(correspondences, f, indent=2)
+    if output_file is not None:
+        with open(output_file, "w") as f:
+            json.dump(correspondences, f, indent=2)
 
     print(f"Saved correspondences to {output_file}")
     print(f"Total images: ", len(correspondences["images"]))
@@ -230,8 +233,9 @@ def process_colmap_data(correspondences):
 
 if __name__ == "__main__":
     # Example usage
-    reconstruction_folder = "results/easyscene_10/colmap/reconstruction/0"
-    output_file = "./colmap_correspondences.json"
+    reconstruction_folder = "results/no_chessboard/000_10/colmap/reconstruction/0"
+    # output_file = "./colmap_correspondences.json"
+    output_file = None
 
     # Extract and save correspondences
     correspondences = extract_and_save_correspondences(

@@ -33,6 +33,19 @@ def skew(v: np.ndarray):
     )
 
 
+def _compute_left_Jac(rot_vec: np.ndarray):
+    theta = np.linalg.norm(rot_vec)
+    tol = 1e-6
+    if theta < tol:
+        theta = tol
+    n = rot_vec / theta
+    return (
+        np.sin(theta) / theta * np.eye(3)
+        + (1 - np.sin(theta) / theta) * np.outer(n, n)
+        + ((1 - np.cos(theta)) / theta) * skew(n)
+    )
+
+
 def transMat2Vec(T: np.ndarray):
     """
     Convert a 4x4 transformation matrix to a parameter vector.
@@ -43,12 +56,13 @@ def transMat2Vec(T: np.ndarray):
     Returns:
         np.ndarray: Parameter vector [rx, ry, rz, tx, ty, tz]
     """
-    # Extract rotation matrix
+    # Extract rotation matrix and convert to rotation vector
     rot_matrix = T[:3, :3]
-    # Convert to rotation vector
     rot_vec = R.from_matrix(rot_matrix).as_rotvec()
-    # Extract translation vector
-    trans_vec = T[:3, 3]
+
+    # Extrack translation vector
+    J = _compute_left_Jac(rot_vec)
+    trans_vec = np.linalg.solve(J, T[:3, 3])
 
     # Combine into parameter vector
     return np.concatenate([rot_vec, trans_vec])
@@ -69,12 +83,15 @@ def vec2transMat(params: np.ndarray):
     rot_matrix = R.from_rotvec(rot_vec).as_matrix()
 
     # Extract translation vector
-    trans_vec = params[3:6]
+    J = _compute_left_Jac(rot_vec)
+    trans_vec = J @ params[3:6].reshape(3, 1)
 
     # Create transformation matrix
     T = np.eye(4)
     T[:3, :3] = rot_matrix
-    T[:3, 3] = trans_vec
+    T[:3, 3] = trans_vec.reshape(
+        3,
+    )
 
     return T
 
