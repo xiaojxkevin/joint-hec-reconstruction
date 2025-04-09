@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.sparse as sparse
 import scipy.sparse.linalg as linalg
-import os
+import time
 from typing import Dict, List, Tuple, Any
 
 from utils.math_op import inv, skew, transMat2Vec, vec2transMat
@@ -104,7 +104,8 @@ class HandEyeBundleAdjustment:
 
     def compute_analytical_jacobian(self, params):
         """
-        Compute the analytical Jacobian matrix based on the equations in the PDF.
+        Compute the analytical Jacobian matrix based on the equations in the PDF,
+        optimized with numpy vectorization.
 
         Args:
             params: Parameter vector [hand2eye_params, pts3d_in_base]
@@ -116,58 +117,127 @@ class HandEyeBundleAdjustment:
         hand2eye_params = params[:6]
         hand2eye_mat = vec2transMat(hand2eye_params)
         R_eh = hand2eye_mat[:3, :3]
+        t_eh = hand2eye_mat[:3, 3]
 
         # Extract 3D points in base frame
         pts3d_base = params[6:].reshape(self.n_points, 3)
 
-        data = []  # Values
-        row_ind = []  # Row indices
-        col_ind = []  # Column indices
+        # Pre-allocate arrays for sparse matrix construction
+        # Each point in each view contributes 2 rows (x and y) with 6 + 3 columns
+        max_entries = self.total_residuals * (6 + 3)
+        data = np.zeros(max_entries)
+        row_ind = np.zeros(max_entries, dtype=np.int32)
+        col_ind = np.zeros(max_entries, dtype=np.int32)
+        entry_idx = 0
         residual_idx = 0
 
         for view_idx in range(self.n_views):
             base2hand = self.base2hand_poses[view_idx]
             R_hjb = base2hand[:3, :3]
-            pts3d_indices = self.visibility[view_idx]["pts3d_indices"]
+            t_hjb = base2hand[:3, 3]
+            pts3d_indices = np.array(self.visibility[view_idx]["pts3d_indices"])
+            n_points_in_view = len(pts3d_indices)
 
-            for pt3d_idx in pts3d_indices:
-                # Get the 3D point in base frame
-                P_b = pts3d_base[pt3d_idx]
+            if n_points_in_view == 0:
+                raise ValueError("No visible points in this view.")
 
-                # Transform point to hand frame
-                P_hj = R_hjb @ P_b + base2hand[:3, 3]
+            # Get all visible 3D points for this view
+            P_b_all = pts3d_base[pts3d_indices]
 
-                # Transform point to eye frame
-                P_e = R_eh @ P_hj + hand2eye_mat[:3, 3]
-                x, y, z = P_e
+            # Transform all points to hand frame (vectorized)
+            P_hj_all = P_b_all @ R_hjb.T + t_hjb
 
-                # Jacobian for hand2eye
-                proj_jacobian = np.array(
+            # Transform all points to eye frame (vectorized)
+            P_e_all = P_hj_all @ R_eh.T + t_eh
+
+            # Extract components for projection calculations
+            x_all = P_e_all[:, 0]
+            y_all = P_e_all[:, 1]
+            z_all = P_e_all[:, 2]
+
+            J_xi = np.stack(
+                [
+                    np.stack(
+                        [
+                            -self.fx * x_all * y_all / z_all**2,
+                            self.fx + self.fx * x_all**2 / z_all**2,
+                            -self.fx * y_all / z_all,
+                            self.fx / z_all,
+                            np.zeros_like(z_all),
+                            -self.fx * x_all / z_all**2,
+                        ],
+                        axis=1,
+                    ),
+                    np.stack(
+                        [
+                            -self.fy - self.fy * y_all**2 / z_all**2,
+                            self.fy * x_all * y_all / z_all**2,
+                            self.fy * x_all / z_all,
+                            np.zeros_like(z_all),
+                            self.fy / z_all,
+                            -self.fy * y_all / z_all**2,
+                        ],
+                        axis=1,
+                    ),
+                ],
+                axis=1,
+            )  # shape: (N, 2, 6)
+
+            J_pts = (
+                np.stack(
                     [
-                        [self.fx / z, 0, -self.fx * x / (z * z)],
-                        [0, self.fy / z, -self.fy * y / (z * z)],
-                    ]
+                        np.stack(
+                            [
+                                self.fx / z_all,
+                                np.zeros_like(z_all),
+                                -self.fx * x_all / z_all**2,
+                            ],
+                            axis=1,
+                        ),
+                        np.stack(
+                            [
+                                np.zeros_like(z_all),
+                                self.fy / z_all,
+                                -self.fy * y_all / z_all**2,
+                            ],
+                            axis=1,
+                        ),
+                    ],
+                    axis=1,
                 )
-                pose_jacobian = np.hstack([-skew(P_e), np.eye(3)])
-                hand2eye_jacobian = proj_jacobian @ pose_jacobian
-                for i in range(2):
-                    for j in range(6):
-                        row_ind.append(residual_idx + i)
-                        col_ind.append(j)
-                        data.append(hand2eye_jacobian[i, j])
+                @ R_eh
+                @ R_hjb
+            )  # shape: (N, 2, 3)
 
-                # Jacobian for 3D point
-                point_jacobian = proj_jacobian @ R_eh @ R_hjb
-                for i in range(2):
-                    for j in range(3):
-                        row_ind.append(residual_idx + i)
-                        col_ind.append(6 + pt3d_idx * 3 + j)
-                        data.append(point_jacobian[i, j])
+            # For hand-eye transformation parameters (first 6 columns)
+            for point_idx in range(n_points_in_view):
+                for i in range(2):  # 2 rows per point (x and y residuals)
+                    for j in range(6):  # 6 hand-eye parameters
+                        row_ind[entry_idx] = residual_idx + point_idx * 2 + i
+                        col_ind[entry_idx] = j
+                        data[entry_idx] = J_xi[point_idx, i, j]
+                        entry_idx += 1
 
-                # Move to next residual
-                residual_idx += 2
+            # For 3D point parameters
+            for local_idx, global_idx in enumerate(pts3d_indices):
+                for i in range(2):  # 2 rows per point (x and y residuals)
+                    for j in range(3):  # 3 coordinates per point
+                        row_ind[entry_idx] = residual_idx + local_idx * 2 + i
+                        col_ind[entry_idx] = (
+                            6 + global_idx * 3 + j
+                        )  # Offset by 6 for hand-eye params
+                        data[entry_idx] = J_pts[local_idx, i, j]
+                        entry_idx += 1
 
-        # Create sparse Jacobian matrix
+            # Update residual index for the next view
+            residual_idx += n_points_in_view * 2
+
+        # Trim any unused pre-allocated space
+        data = data[:entry_idx]
+        row_ind = row_ind[:entry_idx]
+        col_ind = col_ind[:entry_idx]
+
+        # Create sparse matrix
         jacobian = sparse.csr_matrix(
             (data, (row_ind, col_ind)), shape=(self.total_residuals, self.total_params)
         )
@@ -209,18 +279,27 @@ class HandEyeBundleAdjustment:
                     )
                 break
 
+            start = time.time()
             # Compute analytical Jacobian
             jacobian = self.compute_analytical_jacobian(params)
+            end = time.time()
+            print(f"Jacobian computation time: {end - start:.6f} seconds")
 
+            start = time.time()
             # Compute normal equations: J^T @ J @ Δx = -J^T @ r
             H = jacobian.T @ jacobian
             g = -jacobian.T @ residuals
+            end = time.time()
+            print(f"H computation time: {end - start:.6f} seconds")
 
+            start = time.time()
             # Solve normal equations with regularization for stability
             lambda_reg = 1e-4  # Levenberg-Marquardt damping factor
             delta_params = linalg.spsolve(
                 H + lambda_reg * sparse.eye(self.total_params), g
             )
+            end = time.time()
+            print(f"Solver time: {end - start:.6f} seconds")
 
             # Update points
             params[6:] += delta_params[6:]
@@ -317,11 +396,13 @@ def run_hand_eye_bundle_adjustment(
 if __name__ == "__main__":
     from utils.colmap_utils import extract_and_save_correspondences, process_colmap_data
 
-    exp_name = "0318"
-    colmap_correspondence_path = f"results/{exp_name}/colmap/colmap_raw.json"
-    hand2base_path = f"./data/{exp_name}/hand_tum.txt"
-    reconstruction_folder = f"results/{exp_name}/colmap/reconstruction/0"
-    output_file = "./colmap_correspondences.json"
+    exp_name = "000_10"
+    colmap_correspondence_path = (
+        f"results/no_chessboard/{exp_name}/colmap/colmap_raw.json"
+    )
+    hand2base_path = f"./data/no_chessboard/{exp_name}/hand_tum.txt"
+    reconstruction_folder = f"results/no_chessboard/{exp_name}/colmap/reconstruction/0"
+    output_file = None
 
     # Extract and save correspondences
     correspondences = extract_and_save_correspondences(
@@ -334,7 +415,7 @@ if __name__ == "__main__":
     # Run optimization
     hand2eye_pose = np.eye(4)  # Initial guess
     optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
-        K, hand2eye_pose, w2c, points3D, points2D, visibility, use_scipy=False
+        K, hand2eye_pose, w2c, points3D, points2D, visibility
     )
 
     print("Optimized eye2hand transformation:")
