@@ -53,9 +53,31 @@ class HandEyeBundleAdjustment:
         # Total parameters: 6 for hand2eye + 3 for each 3D point
         self.total_params = 6 + self.n_points * 3
 
-        # self.huber_delta = 1.0  # Huber loss threshold
+        self.huber_delta = 1.0  # Huber loss threshold
         # Max iterations for optimization
         self.max_it = max_it
+
+    def huber_loss(self, residuals):
+        abs_res = np.abs(residuals)
+        mask = abs_res <= self.huber_delta
+
+        # For |r| <= delta: r^2/2
+        # For |r| > delta: delta*(|r| - delta/2)
+        quadratic = 0.5 * residuals[mask] ** 2
+        linear = self.huber_delta * (abs_res[~mask] - 0.5 * self.huber_delta)
+
+        return np.sum(quadratic) + np.sum(linear)
+
+    def compute_weights(self, residuals):
+        abs_res = np.abs(residuals)
+        mask = abs_res <= self.huber_delta
+        abs_res[abs_res < 1e-6] = 1e-6  # Avoid division by zero
+        weights = np.zeros_like(residuals)
+        weights[mask] = 1.0
+        weights[~mask] = self.huber_delta / abs_res[~mask]
+
+        n = len(residuals)
+        return sparse.dia_matrix((weights, 0), shape=(n, n))
 
     def compute_residuals_and_jacobian(self, params, compute_jacobian=True):
         hand2eye_params = params[:6]
@@ -63,14 +85,14 @@ class HandEyeBundleAdjustment:
         R_eh = hand2eye_mat[:3, :3]
         t_eh = hand2eye_mat[:3, 3]
         pts3d_base = params[6:].reshape(-1, 3)  # (n, 3)
-        total_residuals = self.total_residuals  # K
+        total_residuals = self.total_residuals  # 2K
         max_entries = total_residuals * (6 + 3)
-        data = np.zeros(max_entries)  # (9K,)
-        row_ids = np.zeros(max_entries, dtype=np.int32)  # (9K,)
-        col_ids = np.zeros(max_entries, dtype=np.int32)  # (9K,)
+        data = np.zeros(max_entries)  # (18K,)
+        row_ids = np.zeros(max_entries, dtype=np.int32)  # (18K,)
+        col_ids = np.zeros(max_entries, dtype=np.int32)  # (18K,)
         entry_idx = 0
         residual_idx = 0
-        residuals = np.zeros(total_residuals)  # (K,)
+        residuals = np.zeros(total_residuals)  # (2K,)
         jacobian = None
 
         for view_idx in range(self.n_views):
@@ -106,6 +128,7 @@ class HandEyeBundleAdjustment:
             ).ravel()
 
             if not compute_jacobian:
+                residual_idx += 2 * n_points_in_view
                 continue
 
             # Jacobian for pose
@@ -173,38 +196,29 @@ class HandEyeBundleAdjustment:
 
             # Define sparse Jacobian matrix
             jacobian = sparse.csr_matrix(
-                (data[:entry_idx], (row_ids[:entry_idx], col_ids[:entry_idx])),
+                (data, (row_ids, col_ids)),
                 shape=(self.total_residuals, self.total_params),
             )
 
         return residuals, jacobian
 
-    def custom_least_squares(self, ftol=1e-6, lambda_=1e-2, verbose=True):
+    def custom_least_squares(self, tol=1e-6, lambda_=1e-3, verbose=True):
         """ """
         # Initial parameters
         hand2eye_params = transMat2Vec(self.hand2eye)
         params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
 
-        # Previous cost for convergence check
-        prev_cost = np.inf
-
         # Optimization loop
         for iteration in range(1, self.max_it + 1):
             # Compute residuals
             residuals, jacobian = self.compute_residuals_and_jacobian(params)
-            cost = np.sum(residuals**2)
+            cost = self.huber_loss(residuals)
 
-            # Check convergence
-            if np.abs(prev_cost - cost) < ftol:
-                if verbose:
-                    print(
-                        f"Converged at iteration {iteration}: cost difference below tolerance"
-                    )
-                break
-
-            # Compute normal equations: J^T @ J @ Δx = -J^T @ r
-            H: sparse.csc_matrix = jacobian.T @ jacobian
-            g: np.ndarray = -jacobian.T @ residuals
+            # H: sparse.csc_matrix = jacobian.T @ jacobian
+            # g: np.ndarray = -jacobian.T @ residuals
+            W = self.compute_weights(residuals)
+            H: sparse.csc_matrix = jacobian.T @ W @ jacobian
+            g: np.ndarray = -jacobian.T @ W @ residuals
 
             # Solve the equation
             delta_params = linalg.spsolve(
@@ -228,9 +242,13 @@ class HandEyeBundleAdjustment:
                 vec2transMat(delta_params[:6]) @ vec2transMat(params[:6])
             )
 
-            if verbose:
+            if verbose and iteration > 0:
                 print(f"Iteration {iteration}: cost = {cost:.6f}")
-            prev_cost = cost
+
+            if np.sum(np.abs(delta_params[3:6])) < tol:
+                print(
+                    f"Converged at iteration {iteration}: cost difference below tolerance"
+                )
 
         return params
 
@@ -246,13 +264,13 @@ class HandEyeBundleAdjustment:
         initial_params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
 
         # Compute initial cost
-        initial_residuals, _ = self.compute_residuals_and_jacobian(
-            initial_params, False
-        )
-        initial_cost = np.sum(initial_residuals**2)
-        print(f"Initial cost: {initial_cost:.6f}")
+        # initial_residuals, _ = self.compute_residuals_and_jacobian(
+        #     initial_params, False
+        # )
+        # initial_cost = self.huber_loss(initial_residuals)
+        # print(f"Initial cost: {initial_cost:.6f}")
 
-        optimized_params = self.custom_least_squares(ftol=1e-6)
+        optimized_params = self.custom_least_squares(tol=1e-6)
 
         # Extract optimized parameters
         hand2eye_params = optimized_params[:6]
@@ -261,11 +279,11 @@ class HandEyeBundleAdjustment:
         optimized_points = optimized_params[6:].reshape(self.n_points, 3)
 
         # Compute final cost
-        final_residuals, _ = self.compute_residuals_and_jacobian(
-            optimized_params, False
-        )
-        final_cost = np.sum(final_residuals**2)
-        print(f"Final cost: {final_cost:.6f}")
+        # final_residuals, _ = self.compute_residuals_and_jacobian(
+        #     optimized_params, False
+        # )
+        # final_cost = self.huber_loss(final_residuals)
+        # print(f"Final cost: {final_cost:.6f}")
 
         return optimized_eye2hand, optimized_points
 
@@ -278,21 +296,7 @@ def run_hand_eye_bundle_adjustment(
     pts2d: np.ndarray,
     visibility: np.ndarray,
 ):
-    """
-    Run hand-eye bundle adjustment with analytical Jacobian and Huber loss.
-
-    Args:
-        K: Camera intrinsic matrix (3x3)
-        hand2eye_pose: Initial hand-to-eye transformation matrix (4x4)
-        base2hand_poses: Base-to-hand transformation matrices for each view (N x 4x4)
-        pts3d_in_base: 3D points in base frame (M x 3)
-        pts2d: 2D image points (K x 2)
-        visibility: Dictionary containing visibility information for each view
-        use_scipy: Whether to use scipy's least_squares or custom implementation
-
-    Returns:
-        Optimized eye2hand transformation and 3D points
-    """
+    """ """
     # Run bundle adjustment
     ba = HandEyeBundleAdjustment(
         K, hand2eye_pose, base2hand_poses, pts3d_in_base, pts2d, visibility

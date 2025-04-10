@@ -64,7 +64,6 @@ def jcr_run(
     obj2eye_poses = np.asarray([inv(pose) for pose in eye2obj_poses], dtype=np.float64)
     idx = 0
     pts_in_base = geomu.transform_pts_np(pts, eye2base_poses[idx] @ obj2eye_poses[idx])
-    # np.savetxt(f"{save_dir}/eye2base_poses.txt", geomu.matrices_to_tum(eye2base_poses), fmt="%.6f")
 
     ############################# for debugging #############################
     # check for obj2base transformation
@@ -84,6 +83,17 @@ def jcr_run(
         pts_color_vis,
         os.path.join(config["exp_dir"], "init_scene.html"),
     )
+    # For debugging: save the initial transformation matrices
+    raw_data = {
+        "K": K,
+        "eye2base": eye2base_poses,
+        "hand2base": hand2base_poses,
+        "pts_in_base": pts_in_base,
+        "pts_colors": rgb_colors,
+        "visibility": visibility,
+        "points2D": points2D,
+    }
+    np.savez(os.path.join(config["exp_dir"], "raw.npz"), **raw_data)
 
     # Run bundle adjustment
     print(
@@ -107,14 +117,15 @@ def jcr_run(
         os.path.join(config["exp_dir"], "ba_scene.html"),
     )
 
-    tensors_to_save = {
-        # "K": K_opt,
+    # All data are numpy ndarray
+    final_data = {
+        "K": K,
         "eye2base": eye2base_poses,
         "hand2base": hand2base_poses,
         "pts_in_base": optimized_points,
         "pts_colors": rgb_colors,
     }
-    torch.save(tensors_to_save, os.path.join(config["exp_dir"], "final.pth"))
+    np.savez(os.path.join(config["exp_dir"], "final.npz"), **final_data)
     print("<>" * 20)
     print(f"All results are saved.")
 
