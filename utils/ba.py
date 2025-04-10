@@ -57,204 +57,127 @@ class HandEyeBundleAdjustment:
         # Max iterations for optimization
         self.max_it = max_it
 
-    def objective_function(self, params):
-        """
-        Compute the residuals for the bundle adjustment.
-
-        Args:
-            params: Parameter vector [hand2eye_params, pts3d_in_base]
-
-        Returns:
-            Flattened residual vector
-        """
-        # Extract hand2eye transformation parameters
+    def compute_residuals_and_jacobian(self, params, compute_jacobian=True):
         hand2eye_params = params[:6]
-        hand2eye_mat = vec2transMat(hand2eye_params)
-
-        # Extract 3D points in base frame
-        pts3d_base = params[6:].reshape(self.n_points, 3)
-
-        # Compute residuals for each observation
-        residuals = []
-
-        for idx in range(self.n_views):
-            base2hand = self.base2hand_poses[idx]
-            base2eye = hand2eye_mat @ base2hand
-
-            # Get visible 3D points in base frame for this view
-            pts3d_indices = self.visibility[idx]["pts3d_indices"]
-            pts3d_base_used = pts3d_base[pts3d_indices]
-
-            # Transform points to eye frame
-            pts3d_eye = pts3d_base_used @ base2eye[:3, :3].T + base2eye[:3, 3]
-
-            # Project to 2D
-            z = pts3d_eye[:, 2]
-            pts2d_projected = np.column_stack(
-                [
-                    self.fx * pts3d_eye[:, 0] / z + self.cx,
-                    self.fy * pts3d_eye[:, 1] / z + self.cy,
-                ]
-            )
-
-            # Compute residual
-            pts2d_used = self.pts2d[self.visibility[idx]["pts2d_indices"]]
-            view_residuals = (pts2d_projected - pts2d_used).ravel()
-            residuals.extend(view_residuals)
-
-        return np.array(residuals)
-
-    def compute_analytical_jacobian(self, params):
-        """
-        Compute the analytical Jacobian matrix based on the equations in the PDF,
-        optimized with numpy vectorization.
-
-        Args:
-            params: Parameter vector [hand2eye_params, pts3d_in_base]
-
-        Returns:
-            Jacobian matrix as scipy.sparse.csr_matrix
-        """
-        # Extract hand2eye transformation parameters
-        hand2eye_params = params[:6]
-        hand2eye_mat = vec2transMat(hand2eye_params)
+        hand2eye_mat = vec2transMat(hand2eye_params)  # (4, 4)
         R_eh = hand2eye_mat[:3, :3]
         t_eh = hand2eye_mat[:3, 3]
-
-        # Extract 3D points in base frame
-        pts3d_base = params[6:].reshape(self.n_points, 3)
-
-        # Pre-allocate arrays for sparse matrix construction
-        # Each point in each view contributes 2 rows (x and y) with 6 + 3 columns
-        max_entries = self.total_residuals * (6 + 3)
-        data = np.zeros(max_entries)
-        row_ind = np.zeros(max_entries, dtype=np.int32)
-        col_ind = np.zeros(max_entries, dtype=np.int32)
+        pts3d_base = params[6:].reshape(-1, 3)  # (n, 3)
+        total_residuals = self.total_residuals  # K
+        max_entries = total_residuals * (6 + 3)
+        data = np.zeros(max_entries)  # (9K,)
+        row_ids = np.zeros(max_entries, dtype=np.int32)  # (9K,)
+        col_ids = np.zeros(max_entries, dtype=np.int32)  # (9K,)
         entry_idx = 0
         residual_idx = 0
+        residuals = np.zeros(total_residuals)  # (K,)
+        jacobian = None
 
         for view_idx in range(self.n_views):
-            base2hand = self.base2hand_poses[view_idx]
+            base2hand: np.ndarray = self.base2hand_poses[view_idx]  # (4, 4)
             R_hjb = base2hand[:3, :3]
             t_hjb = base2hand[:3, 3]
-            pts3d_indices = np.array(self.visibility[view_idx]["pts3d_indices"])
+            vis_info = self.visibility[view_idx]
+
+            # Find points can be viewd in this view
+            pts3d_indices = np.array(vis_info["pts3d_indices"])
             n_points_in_view = len(pts3d_indices)
-
             if n_points_in_view == 0:
-                raise ValueError("No visible points in this view.")
+                continue
+            pts3d_used = pts3d_base[pts3d_indices]
 
-            # Get all visible 3D points for this view
-            P_b_all = pts3d_base[pts3d_indices]
+            # Points in the camera frame
+            P_hj = pts3d_used @ R_hjb.T + t_hjb
+            P_e = P_hj @ R_eh.T + t_eh
+            x = P_e[:, 0]  # (n, 1)
+            y = P_e[:, 1]
+            z = P_e[:, 2]
 
-            # Transform all points to hand frame (vectorized)
-            P_hj_all = P_b_all @ R_hjb.T + t_hjb
-
-            # Transform all points to eye frame (vectorized)
-            P_e_all = P_hj_all @ R_eh.T + t_eh
-
-            # Extract components for projection calculations
-            x_all = P_e_all[:, 0]
-            y_all = P_e_all[:, 1]
-            z_all = P_e_all[:, 2]
-
-            J_xi = np.stack(
+            # Project points to image plane
+            pts2d_projected = np.column_stack(
                 [
-                    np.stack(
-                        [
-                            -self.fx * x_all * y_all / z_all**2,
-                            self.fx + self.fx * x_all**2 / z_all**2,
-                            -self.fx * y_all / z_all,
-                            self.fx / z_all,
-                            np.zeros_like(z_all),
-                            -self.fx * x_all / z_all**2,
-                        ],
-                        axis=1,
-                    ),
-                    np.stack(
-                        [
-                            -self.fy - self.fy * y_all**2 / z_all**2,
-                            self.fy * x_all * y_all / z_all**2,
-                            self.fy * x_all / z_all,
-                            np.zeros_like(z_all),
-                            self.fy / z_all,
-                            -self.fy * y_all / z_all**2,
-                        ],
-                        axis=1,
-                    ),
+                    self.fx * x / z + self.cx,
+                    self.fy * y / z + self.cy,
+                ]
+            )  # (n, 2)
+            pts2d_used = self.pts2d[vis_info["pts2d_indices"]]
+            residuals[residual_idx : residual_idx + 2 * n_points_in_view] = (
+                pts2d_projected - pts2d_used
+            ).ravel()
+
+            if not compute_jacobian:
+                continue
+
+            # Jacobian for pose
+            fx, fy = self.fx, self.fy
+            J_xi_part1 = np.stack(
+                [
+                    -fx * x * y / z**2,
+                    fx + fx * x**2 / z**2,
+                    -fx * y / z,
+                    fx / z,
+                    np.zeros_like(z),
+                    -fx * x / z**2,
                 ],
                 axis=1,
-            )  # shape: (N, 2, 6)
+            )
+            J_xi_part2 = np.stack(
+                [
+                    -fy - fy * y**2 / z**2,
+                    fy * x * y / z**2,
+                    fy * x / z,
+                    np.zeros_like(z),
+                    fy / z,
+                    -fy * y / z**2,
+                ],
+                axis=1,
+            )
+            J_xi = np.stack([J_xi_part1, J_xi_part2], axis=1)  # (n, 2, 6)
 
-            J_pts = (
-                np.stack(
-                    [
-                        np.stack(
-                            [
-                                self.fx / z_all,
-                                np.zeros_like(z_all),
-                                -self.fx * x_all / z_all**2,
-                            ],
-                            axis=1,
-                        ),
-                        np.stack(
-                            [
-                                np.zeros_like(z_all),
-                                self.fy / z_all,
-                                -self.fy * y_all / z_all**2,
-                            ],
-                            axis=1,
-                        ),
-                    ],
-                    axis=1,
-                )
-                @ R_eh
-                @ R_hjb
-            )  # shape: (N, 2, 3)
+            # Jacobian for points
+            J_pts_part1 = np.stack([fx / z, np.zeros_like(z), -fx * x / z**2], axis=1)
+            J_pts_part2 = np.stack([np.zeros_like(z), fy / z, -fy * y / z**2], axis=1)
+            J_pts_base = np.stack([J_pts_part1, J_pts_part2], axis=1)
+            J_pts = J_pts_base @ R_eh @ R_hjb  # (n, 2, 3)
 
-            # Vectorized assignment for hand-eye parameters (J_xi)
+            # Fill in all Jacobian for poses (the first 6 columns)
             n_entries_xi = n_points_in_view * 2 * 6
             end_xi = entry_idx + n_entries_xi
-            if end_xi > max_entries:
-                raise ValueError("Pre-allocated arrays are too small.")
-
-            data[entry_idx:end_xi] = J_xi.reshape(-1)
-            row_ind[entry_idx:end_xi] = (
-                residual_idx + np.arange(n_points_in_view * 2)
-            ).repeat(6)
-            col_ind[entry_idx:end_xi] = np.tile(np.arange(6), n_points_in_view * 2)
+            data[entry_idx:end_xi] = J_xi.ravel()
+            row_ids[entry_idx:end_xi] = np.repeat(
+                residual_idx + np.arange(2 * n_points_in_view), 6
+            )
+            col_ids[entry_idx:end_xi] = np.tile(np.arange(6), 2 * n_points_in_view)
             entry_idx = end_xi
 
-            # Vectorized assignment for 3D points (J_pts)
+            # Fill in all Jacobian for points (only one in each row block)
             n_entries_pts = n_points_in_view * 2 * 3
             end_pts = entry_idx + n_entries_pts
-            if end_pts > max_entries:
-                raise ValueError("Pre-allocated arrays are too small.")
-
-            row_ind_pts = (residual_idx + np.arange(n_points_in_view * 2)).repeat(3)
-            row_ind[entry_idx:end_pts] = row_ind_pts
-
-            global_indices = pts3d_indices
-            j_values_per_point = np.tile(np.arange(3), 2)
-            global_indices_expanded = global_indices.repeat(6)
-            j_values_all = np.tile(j_values_per_point, n_points_in_view)
-            col_ind_pts = 6 + 3 * global_indices_expanded + j_values_all
-            col_ind[entry_idx:end_pts] = col_ind_pts
-
-            data[entry_idx:end_pts] = J_pts.reshape(-1)
+            data[entry_idx:end_pts] = J_pts.ravel()
+            row_ids[entry_idx:end_pts] = np.repeat(
+                residual_idx + np.arange(2 * n_points_in_view), 3
+            )
+            col_ids[entry_idx:end_pts] = (
+                6
+                + 3 * np.repeat(pts3d_indices, 6)
+                + np.tile([0, 1, 2, 0, 1, 2], n_points_in_view)
+            )
             entry_idx = end_pts
-            residual_idx += n_points_in_view * 2
 
-        # Trim any unused pre-allocated space
-        data = data[:entry_idx]
-        row_ind = row_ind[:entry_idx]
-        col_ind = col_ind[:entry_idx]
+            residual_idx += 2 * n_points_in_view
 
-        # Create sparse matrix
-        jacobian = sparse.csr_matrix(
-            (data, (row_ind, col_ind)), shape=(self.total_residuals, self.total_params)
-        )
+        if compute_jacobian:
+            assert (
+                entry_idx == max_entries
+            ), f"Entry index mismatch: {entry_idx} != {max_entries}"
 
-        return jacobian
+            # Define sparse Jacobian matrix
+            jacobian = sparse.csr_matrix(
+                (data[:entry_idx], (row_ids[:entry_idx], col_ids[:entry_idx])),
+                shape=(self.total_residuals, self.total_params),
+            )
+
+        return residuals, jacobian
 
     def custom_least_squares(self, ftol=1e-6, lambda_=1e-2, verbose=True):
         """ """
@@ -266,10 +189,10 @@ class HandEyeBundleAdjustment:
         prev_cost = np.inf
 
         # Optimization loop
-        for iteration in range(self.max_it):
+        for iteration in range(1, self.max_it + 1):
             # Compute residuals
-            residuals = self.objective_function(params)
-            cost = np.sqrt(np.sum(residuals**2))
+            residuals, jacobian = self.compute_residuals_and_jacobian(params)
+            cost = np.sum(residuals**2)
 
             # Check convergence
             if np.abs(prev_cost - cost) < ftol:
@@ -278,9 +201,6 @@ class HandEyeBundleAdjustment:
                         f"Converged at iteration {iteration}: cost difference below tolerance"
                     )
                 break
-
-            # Compute analytical Jacobian
-            jacobian = self.compute_analytical_jacobian(params)
 
             # Compute normal equations: J^T @ J @ Δx = -J^T @ r
             H: sparse.csc_matrix = jacobian.T @ jacobian
@@ -308,16 +228,11 @@ class HandEyeBundleAdjustment:
                 vec2transMat(delta_params[:6]) @ vec2transMat(params[:6])
             )
 
-            if verbose and (iteration % 1 == 0 or iteration == self.max_it - 1):
+            if verbose:
                 print(f"Iteration {iteration}: cost = {cost:.6f}")
             prev_cost = cost
 
-        result = {
-            "x": params,
-            "nit": iteration + 1,
-        }
-
-        return result
+        return params
 
     def run_bundle_adjustment(self):
         """
@@ -331,12 +246,13 @@ class HandEyeBundleAdjustment:
         initial_params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
 
         # Compute initial cost
-        initial_residuals = self.objective_function(initial_params)
-        initial_cost = np.sqrt(np.sum(initial_residuals**2))
+        initial_residuals, _ = self.compute_residuals_and_jacobian(
+            initial_params, False
+        )
+        initial_cost = np.sum(initial_residuals**2)
         print(f"Initial cost: {initial_cost:.6f}")
 
-        result = self.custom_least_squares(ftol=1e-6)
-        optimized_params = result["x"]
+        optimized_params = self.custom_least_squares(ftol=1e-6)
 
         # Extract optimized parameters
         hand2eye_params = optimized_params[:6]
@@ -345,8 +261,10 @@ class HandEyeBundleAdjustment:
         optimized_points = optimized_params[6:].reshape(self.n_points, 3)
 
         # Compute final cost
-        final_residuals = self.objective_function(optimized_params)
-        final_cost = np.sqrt(np.sum(final_residuals**2))
+        final_residuals, _ = self.compute_residuals_and_jacobian(
+            optimized_params, False
+        )
+        final_cost = np.sum(final_residuals**2)
         print(f"Final cost: {final_cost:.6f}")
 
         return optimized_eye2hand, optimized_points
