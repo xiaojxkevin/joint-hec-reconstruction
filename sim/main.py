@@ -81,7 +81,7 @@ class HandEyeCalibrationSimulator:
         self.camera_pose_method = config["cam_method"]
         self.size = config["size"]
         self.max_samples = config["max_sample"]
-        self.SHAPENET_PATH = "/mnt/data/ShapeNetCoreV2/data"
+        self.SHAPENET_PATH = config["shapeNet_path"]
         # self.categories = sorted(os.listdir(self.SHAPENET_PATH))
         self.categories = config["categories"]
         self.use_chessboard = config["use_chessboard"]
@@ -229,7 +229,12 @@ class HandEyeCalibrationSimulator:
             print(
                 f"Placed object at position [{position_x:.2f}, {position_y:.2f}, {position_z:.2f}]."
             )
+            for material in obj.get_materials():
+                bproc.material.add_dust(
+                    material, strength=np.random.rand() / 2.0, texture_scale=0.05
+                )
             return obj
+
         print("*************Failed to place object after maximum attempts*************")
         return None  # None if the object could not be placed after max attempts
 
@@ -239,31 +244,31 @@ class HandEyeCalibrationSimulator:
         key_light = bproc.types.Light()
         key_light.set_type("POINT")
         key_light.set_location([5, -5, 5])
-        key_light.set_energy(500)
+        key_light.set_energy(300)
 
         # Create a fill light (reduces shadows from the key light)
         fill_light = bproc.types.Light()
         fill_light.set_type("POINT")
         fill_light.set_location([-5, 5, 5])
-        fill_light.set_energy(500)
+        fill_light.set_energy(300)
 
         # Add back light (creates separation between objects and background)
         back_light = bproc.types.Light()
         back_light.set_type("POINT")
         back_light.set_location([0, -5, 5])
-        back_light.set_energy(500)
+        back_light.set_energy(300)
 
         # Add rim light (highlights object edges)
         rim_light = bproc.types.Light()
         rim_light.set_type("POINT")
         rim_light.set_location([-5, -5, 5])
-        rim_light.set_energy(500)
+        rim_light.set_energy(300)
 
         # Add overhead fill light
         overhead_light = bproc.types.Light()
         overhead_light.set_type("POINT")
         overhead_light.set_location([0, 0, 8])
-        overhead_light.set_energy(500)
+        overhead_light.set_energy(300)
 
         # Add additional corner lights for even coverage
         corner_light1 = bproc.types.Light()
@@ -504,14 +509,23 @@ class HandEyeCalibrationSimulator:
                 # Convert numpy array to PIL Image and save
                 img_array_uint8 = img_array.astype(np.uint8)
                 img = Image.fromarray(img_array_uint8)
+                # Add noise
+                from PIL import ImageFilter
+
+                img = img.filter(ImageFilter.GaussianBlur(radius=1.0))
                 img.save(img_path)
 
     def render_and_save(self):
         """Render the scene and save all data in the required format."""
         # Set renderer parameters for better quality
+        # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+        bproc.renderer.set_render_devices(
+            desired_gpu_device_type="CUDA", desired_gpu_ids=[3]
+        )
         bproc.renderer.set_noise_threshold(0.01)
         bproc.renderer.set_max_amount_of_samples(self.max_samples)
-        # bproc.renderer.set_denoiser("")
+        bproc.renderer.set_cpu_threads(6)
+        # bproc.renderer.enable_motion_blur(motion_blur_length=0.01)
 
         # Render the scene
         data = bproc.renderer.render()
