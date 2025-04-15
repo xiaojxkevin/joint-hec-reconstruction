@@ -22,18 +22,9 @@ class HandEyeBundleAdjustment:
         pts2d: np.ndarray,
         visibility: np.ndarray,
         max_it: int = 10,
+        tol: float = 1e-6,
     ):
-        """
-        Initialize the bundle adjustment solver.
-
-        Args:
-            K: Camera intrinsic matrix (3x3)
-            hand2eye_pose: Initial hand-to-eye transformation matrix (4x4)
-            base2hand_poses: Base-to-hand transformation matrices for each view (N x 4x4)
-            pts3d_in_base: 3D points in base frame (M x 3)
-            pts2d: 2D image points (K x 2)
-            visibility: Dictionary containing visibility information for each view
-        """
+        """ """
         self.fx, self.fy, self.cx, self.cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
         self.hand2eye = hand2eye_pose
         self.base2hand_poses = base2hand_poses
@@ -54,8 +45,10 @@ class HandEyeBundleAdjustment:
         self.total_params = 6 + self.n_points * 3
 
         self.huber_delta = 1.0  # Huber loss threshold
-        # Max iterations for optimization
+        self.mu = 1e-2  # Regularization parameter in LM
+
         self.max_it = max_it
+        self.tol = tol
 
     def huber_loss(self, residuals):
         abs_res = np.abs(residuals)
@@ -202,11 +195,12 @@ class HandEyeBundleAdjustment:
 
         return residuals, jacobian
 
-    def custom_least_squares(self, tol=1e-6, lambda_=1e-3, verbose=True):
+    def custom_least_squares(self):
         """ """
         # Initial parameters
         hand2eye_params = transMat2Vec(self.hand2eye)
         params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
+        num_params = len(params)
 
         # Optimization loop
         for iteration in range(1, self.max_it + 1):
@@ -222,18 +216,12 @@ class HandEyeBundleAdjustment:
 
             # Solve the equation
             delta_params = linalg.spsolve(
-                H + lambda_ * sparse.eye(self.total_params), g
+                H
+                + self.mu
+                * sparse.dia_matrix((H.diagonal(), 0), shape=(num_params, num_params)),
+                g,
             )
-            lambda_ = max(1e-6, lambda_ * 0.5)
-            # TODO: use schur elimination
-            # B = H[:6, :6] + np.eye(6) * lambda_reg
-            # E = H[:6, 6:]
-            # C = H[6:, 6:].tocsc() + sparse.eye(self.n_points * 3) * lambda_reg
-            # g1 = g[:6]
-            # g2 = g[6:]
-            # inv_C = linalg.inv(C)
-            # delta_pose = scipy.linalg.solve(B - E @ inv_C @ E.T, g1 - E @ inv_C @ g2)
-            # delta_pts = linalg.spsolve(C, g2 - E.T @ delta_pose)
+            self.mu = max(1e-6, self.mu * 0.5)
 
             # Update points
             params[6:] += delta_params[6:]
@@ -242,13 +230,14 @@ class HandEyeBundleAdjustment:
                 vec2transMat(delta_params[:6]) @ vec2transMat(params[:6])
             )
 
-            if verbose and iteration > 0:
-                print(f"Iteration {iteration}: cost = {cost:.6f}")
+            if iteration > 0:
+                print(f"Iteration {iteration}: Huber cost = {cost:.6f}")
 
-            if np.sum(np.abs(delta_params[3:6])) < tol:
+            if np.linalg.norm(delta_params[3:6]) < self.tol:
                 print(
                     f"Converged at iteration {iteration}: cost difference below tolerance"
                 )
+                break
 
         return params
 
@@ -261,16 +250,8 @@ class HandEyeBundleAdjustment:
         """
         # Initial parameter vector
         hand2eye_params = transMat2Vec(self.hand2eye)
-        initial_params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
 
-        # Compute initial cost
-        # initial_residuals, _ = self.compute_residuals_and_jacobian(
-        #     initial_params, False
-        # )
-        # initial_cost = self.huber_loss(initial_residuals)
-        # print(f"Initial cost: {initial_cost:.6f}")
-
-        optimized_params = self.custom_least_squares(tol=1e-6)
+        optimized_params = self.custom_least_squares()
 
         # Extract optimized parameters
         hand2eye_params = optimized_params[:6]
@@ -278,32 +259,7 @@ class HandEyeBundleAdjustment:
         optimized_eye2hand = inv(optimized_hand2eye)
         optimized_points = optimized_params[6:].reshape(self.n_points, 3)
 
-        # Compute final cost
-        # final_residuals, _ = self.compute_residuals_and_jacobian(
-        #     optimized_params, False
-        # )
-        # final_cost = self.huber_loss(final_residuals)
-        # print(f"Final cost: {final_cost:.6f}")
-
         return optimized_eye2hand, optimized_points
-
-
-def run_hand_eye_bundle_adjustment(
-    K: np.ndarray,
-    hand2eye_pose: np.ndarray,
-    base2hand_poses: np.ndarray,
-    pts3d_in_base: np.ndarray,
-    pts2d: np.ndarray,
-    visibility: np.ndarray,
-):
-    """ """
-    # Run bundle adjustment
-    ba = HandEyeBundleAdjustment(
-        K, hand2eye_pose, base2hand_poses, pts3d_in_base, pts2d, visibility
-    )
-    optimized_eye2hand, optimized_points = ba.run_bundle_adjustment()
-
-    return optimized_eye2hand, optimized_points
 
 
 if __name__ == "__main__":
@@ -316,20 +272,3 @@ if __name__ == "__main__":
     hand2base_path = f"./data/no_chessboard/{exp_name}/hand_tum.txt"
     reconstruction_folder = f"results/no_chessboard/{exp_name}/colmap/reconstruction/0"
     output_file = None
-
-    # Extract and save correspondences
-    correspondences = extract_and_save_correspondences(
-        reconstruction_folder, output_file
-    )
-
-    # Process the COLMAP data
-    K, w2c, points3D, points2D, visibility = process_colmap_data(correspondences)
-
-    # Run optimization
-    hand2eye_pose = np.eye(4)  # Initial guess
-    optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
-        K, hand2eye_pose, w2c, points3D, points2D, visibility
-    )
-
-    print("Optimized eye2hand transformation:")
-    print(optimized_eye2hand)

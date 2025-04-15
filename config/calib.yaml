@@ -1,4 +1,7 @@
-out_dir: "./results"
 model_path: "./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
-data_dir: "data"
 step: 1 # step size for sampling images
+use_ransac: True
+ransac_inlier_ratio: 0.75
+ransac_error_threshold: 0.01
+ba_max_iter: 10
+ba_tolerance: 0.001

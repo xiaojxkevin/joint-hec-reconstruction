@@ -19,7 +19,13 @@ def compute_As_Bs(eye2obj_poses: np.ndarray, hand2base_poses: np.ndarray):
     return As, Bs
 
 
-def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray, use_ransac = True, inlier_ratio = 0.75):
+def solve_hand_eye_se3(
+    As: np.ndarray,
+    Bs: np.ndarray,
+    use_ransac=True,
+    inlier_ratio=0.75,
+    error_threshold=1e-2,
+):
     """
     Input:
         As: An array of shape (n, 4, 4) containing SE(3) matrices, where each element is a homogeneous transformation A_i.
@@ -69,22 +75,26 @@ def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray, use_ransac = True, inlier
                 t_X_candidate, _, _, _ = lstsq(C_sample, d_sample, check_finite=False)
             except np.linalg.LinAlgError:
                 continue  # Skip if singular
-            
+
             lambda_candidate = retrive_scale_factor(
-                                np.stack([As[i] for i in sample_indices]), 
-                                np.stack([Bs[i] for i in sample_indices]), 
-                                R_X, 
-                                t_X_candidate)
+                np.stack([As[i] for i in sample_indices]),
+                np.stack([Bs[i] for i in sample_indices]),
+                R_X,
+                t_X_candidate,
+            )
             # Evaluate inliers
             current_inliers = []
             for i in range(n):
                 left_side = As[i, :3, 3].reshape(3, 1)
-                right_side = R_X @ (lambda_candidate * Bs[i, :3, 3].reshape(3, 1)) + \
-                            t_X_candidate - As[i, :3, :3] @ t_X_candidate
+                right_side = (
+                    R_X @ (lambda_candidate * Bs[i, :3, 3].reshape(3, 1))
+                    + t_X_candidate
+                    - As[i, :3, :3] @ t_X_candidate
+                )
                 error = np.linalg.norm(left_side - right_side)
                 if error < error_threshold:
                     current_inliers.append(i)
-            
+
             if len(current_inliers) > max_inliers:
                 max_inliers = len(current_inliers)
                 best_inliers = current_inliers
@@ -108,6 +118,7 @@ def solve_hand_eye_se3(As: np.ndarray, Bs: np.ndarray, use_ransac = True, inlier
 
     return R_X, t_X.flatten(), lambda_
 
+
 def retrive_rotation(As: np.ndarray, Bs: np.ndarray):
     n = As.shape[0]
     M = np.zeros((3, 3), dtype=np.float64)
@@ -130,8 +141,10 @@ def retrive_rotation(As: np.ndarray, Bs: np.ndarray):
         R_X = U @ Vt
     return R_X
 
-def retrive_scale_factor(As: np.ndarray, Bs: np.ndarray, 
-                         R_X: np.ndarray, t_X: np.ndarray):
+
+def retrive_scale_factor(
+    As: np.ndarray, Bs: np.ndarray, R_X: np.ndarray, t_X: np.ndarray
+):
     """
     Compute the scale factor lambda based on the provided As, Bs, R_X, and t_X.
     This function is used to compute the scale factor after obtaining R_X and t_X.
@@ -150,6 +163,7 @@ def retrive_scale_factor(As: np.ndarray, Bs: np.ndarray,
         lambda_sum += lambda_i
 
     return lambda_sum / n
+
 
 # Example usage.
 if __name__ == "__main__":

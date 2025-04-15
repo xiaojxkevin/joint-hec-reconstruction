@@ -9,7 +9,7 @@ import utils.geometric_util as geomu
 from utils.math_op import inv
 from utils.calib import compute_As_Bs, solve_hand_eye_se3
 from utils.visual import vis_scene
-from utils.ba import run_hand_eye_bundle_adjustment
+from utils.ba import HandEyeBundleAdjustment
 
 
 def load_hand_poses(file_path: str, step: int) -> np.ndarray:
@@ -46,7 +46,13 @@ def jcr_run(
 
     As, Bs = compute_As_Bs(eye2obj_poses, hand2base_poses)
 
-    R_eye2hand, t_eye2hand, scale = solve_hand_eye_se3(As, Bs)
+    R_eye2hand, t_eye2hand, scale = solve_hand_eye_se3(
+        As,
+        Bs,
+        use_ransac=config["use_ransac"],
+        inlier_ratio=config["ransac_inlier_ratio"],
+        error_threshold=config["ransac_error_threshold"],
+    )
     print("<>" * 20)
     print("R_eye2hand:\n", R_eye2hand)
     print("t_eye2hand: ", t_eye2hand)
@@ -99,9 +105,17 @@ def jcr_run(
     print(
         "----------------------- Run bundle adjustment ----------------------------------"
     )
-    optimized_eye2hand, optimized_points = run_hand_eye_bundle_adjustment(
-        K, inv(T_eye2hand), base2hand_poses, pts_in_base, points2D, visibility
+    ba = HandEyeBundleAdjustment(
+        K=K,
+        hand2eye_pose=inv(T_eye2hand),
+        base2hand_poses=base2hand_poses,
+        pts3d_in_base=pts_in_base,
+        pts2d=points2D,
+        visibility=visibility,
+        max_it=config["ba_max_iter"],
+        tol=config["ba_tolerance"],
     )
+    optimized_eye2hand, optimized_points = ba.run_bundle_adjustment()
     np.savetxt(
         os.path.join(config["exp_dir"], "ba_T_eye2hand.txt"),
         optimized_eye2hand,
@@ -124,6 +138,8 @@ def jcr_run(
         "hand2base": hand2base_poses,
         "pts_in_base": optimized_points,
         "pts_colors": rgb_colors,
+        "visibility": visibility,
+        "points2D": points2D,
     }
     np.savez(os.path.join(config["exp_dir"], "final.npz"), **final_data)
     print("<>" * 20)
@@ -141,11 +157,26 @@ def main():
         default="./config/calib.yaml",
         help="Path to the config yaml file",
     )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="./data",
+        help="Path to the folder that contains the data",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="./results",
+        help="Path to the folder that stores the output",
+    )
     args = parser.parse_args()
     with open(args.config_path, "r") as f:
         config = yaml.safe_load(f)
 
     # Load data info
+    config["exp_name"] = args.exp_name
+    config["data_dir"] = args.data_dir
+    config["out_dir"] = args.out_dir
     config["hand_path"] = os.path.join(
         config["data_dir"], args.exp_name, "hand_tum.txt"
     )
