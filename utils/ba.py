@@ -1,7 +1,7 @@
 import numpy as np
 import scipy
 import scipy.sparse as sparse
-import scipy.sparse.linalg as linalg
+import scipy.sparse.linalg as slinalg
 import time
 from typing import Dict, List, Tuple, Any
 from utils.math_op import inv, skew, transMat2Vec, vec2transMat
@@ -79,14 +79,23 @@ class HandEyeBundleAdjustment:
         t_eh = hand2eye_mat[:3, 3]
         pts3d_base = params[6:].reshape(-1, 3)  # (n, 3)
         total_residuals = self.total_residuals  # 2K
-        max_entries = total_residuals * (6 + 3)
-        data = np.zeros(max_entries)  # (18K,)
-        row_ids = np.zeros(max_entries, dtype=np.int32)  # (18K,)
-        col_ids = np.zeros(max_entries, dtype=np.int32)  # (18K,)
+
+        # Preallocate for residuals
+        residuals = np.zeros(total_residuals)  # (2K,)
+
+        # Preallocate for J1
+        J1 = np.zeros((total_residuals, 6)) if compute_jacobian else None
+
+        # Preallocate for J2
+        max_entries = total_residuals * 3
+        J2 = None
+        data = np.zeros(max_entries)  # (6K,)
+        row_ids = np.zeros(max_entries, dtype=np.int32)  # (6K,)
+        col_ids = np.zeros(max_entries, dtype=np.int32)  # (6K,)
+
+        # Two indices
         entry_idx = 0
         residual_idx = 0
-        residuals = np.zeros(total_residuals)  # (2K,)
-        jacobian = None
 
         for view_idx in range(self.n_views):
             base2hand: np.ndarray = self.base2hand_poses[view_idx]  # (4, 4)
@@ -94,6 +103,7 @@ class HandEyeBundleAdjustment:
             t_hjb = base2hand[:3, 3]
             vis_info = self.visibility[view_idx]
 
+            #################################################################### residuals
             # Find points can be viewd in this view
             pts3d_indices = np.array(vis_info["pts3d_indices"])
             n_points_in_view = len(pts3d_indices)
@@ -124,7 +134,7 @@ class HandEyeBundleAdjustment:
                 residual_idx += 2 * n_points_in_view
                 continue
 
-            # Jacobian for pose
+            #################################################################### J1
             fx, fy = self.fx, self.fy
             J_xi_part1 = np.stack(
                 [
@@ -149,22 +159,15 @@ class HandEyeBundleAdjustment:
                 axis=1,
             )
             J_xi = np.stack([J_xi_part1, J_xi_part2], axis=1)  # (n, 2, 6)
+            J1[residual_idx : residual_idx + 2 * n_points_in_view] = J_xi.reshape(
+                (2 * n_points_in_view, 6)
+            )
 
-            # Jacobian for points
+            #################################################################### J2
             J_pts_part1 = np.stack([fx / z, np.zeros_like(z), -fx * x / z**2], axis=1)
             J_pts_part2 = np.stack([np.zeros_like(z), fy / z, -fy * y / z**2], axis=1)
             J_pts_base = np.stack([J_pts_part1, J_pts_part2], axis=1)
             J_pts = J_pts_base @ R_eh @ R_hjb  # (n, 2, 3)
-
-            # Fill in all Jacobian for poses (the first 6 columns)
-            n_entries_xi = n_points_in_view * 2 * 6
-            end_xi = entry_idx + n_entries_xi
-            data[entry_idx:end_xi] = J_xi.ravel()
-            row_ids[entry_idx:end_xi] = np.repeat(
-                residual_idx + np.arange(2 * n_points_in_view), 6
-            )
-            col_ids[entry_idx:end_xi] = np.tile(np.arange(6), 2 * n_points_in_view)
-            entry_idx = end_xi
 
             # Fill in all Jacobian for points (only one in each row block)
             n_entries_pts = n_points_in_view * 2 * 3
@@ -173,10 +176,8 @@ class HandEyeBundleAdjustment:
             row_ids[entry_idx:end_pts] = np.repeat(
                 residual_idx + np.arange(2 * n_points_in_view), 3
             )
-            col_ids[entry_idx:end_pts] = (
-                6
-                + 3 * np.repeat(pts3d_indices, 6)
-                + np.tile([0, 1, 2, 0, 1, 2], n_points_in_view)
+            col_ids[entry_idx:end_pts] = 3 * np.repeat(pts3d_indices, 6) + np.tile(
+                [0, 1, 2, 0, 1, 2], n_points_in_view
             )
             entry_idx = end_pts
 
@@ -188,52 +189,82 @@ class HandEyeBundleAdjustment:
             ), f"Entry index mismatch: {entry_idx} != {max_entries}"
 
             # Define sparse Jacobian matrix
-            jacobian = sparse.csr_matrix(
+            J2 = sparse.csr_matrix(
                 (data, (row_ids, col_ids)),
-                shape=(self.total_residuals, self.total_params),
+                shape=(self.total_residuals, self.total_params - 6),
             )
 
-        return residuals, jacobian
+        return residuals, J1, J2
+
+    def invert_block_diagonal_csc(self, C: sparse.csc_matrix):
+        inv_blocks = []
+
+        for k in range(self.n_points):
+            # Extract the k-th 3x3 block
+            cols = [3 * k, 3 * k + 1, 3 * k + 2]
+            block = np.zeros((3, 3))
+
+            for i, col in enumerate(cols):
+                start = C.indptr[col]
+                end = C.indptr[col + 1]
+                data_col = C.data[start:end]
+                block[:, i] = data_col
+
+            # Invert the block
+            inv_block = scipy.linalg.inv(block, check_finite=False)
+            inv_blocks.append(inv_block)
+
+        inv_C = sparse.block_diag(inv_blocks, format="csc")
+        return inv_C
 
     def custom_least_squares(self):
         """ """
         # Initial parameters
         hand2eye_params = transMat2Vec(self.hand2eye)
         params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
-        num_params = len(params)
 
         # Optimization loop
         for iteration in range(1, self.max_it + 1):
             # Compute residuals
-            residuals, jacobian = self.compute_residuals_and_jacobian(params)
+            residuals, J1, J2 = self.compute_residuals_and_jacobian(params)
             cost = self.huber_loss(residuals)
 
-            # H: sparse.csc_matrix = jacobian.T @ jacobian
-            # g: np.ndarray = -jacobian.T @ residuals
             W = self.compute_weights(residuals)
-            H: sparse.csc_matrix = jacobian.T @ W @ jacobian
-            g: np.ndarray = -jacobian.T @ W @ residuals
+            B: np.ndarray = J1.T @ W @ J1
+            for i in range(6):
+                B[i, i] += self.mu * B[i, i]
+            E: np.ndarray = J1.T @ W @ J2
+            C: sparse.csc_matrix = J2.T @ W @ J2
+            C += self.mu * sparse.dia_matrix(
+                (C.diagonal(), 0), shape=(self.total_params - 6, self.total_params - 6)
+            )
+            inv_C = self.invert_block_diagonal_csc(C)
+            g1: np.ndarray = -J1.T @ W @ residuals
+            g2: np.ndarray = -J2.T @ W @ residuals
 
             # Solve the equation
-            delta_params = linalg.spsolve(
-                H
-                + self.mu
-                * sparse.dia_matrix((H.diagonal(), 0), shape=(num_params, num_params)),
-                g,
+            delta_pose = scipy.linalg.solve(
+                B - E @ inv_C @ E.T,
+                g1 - E @ inv_C @ g2,
+                check_finite=False,
+                assume_a="hermitian",
             )
-            self.mu = max(1e-6, self.mu * 0.5)
+            delta_points = inv_C @ (g2 - E.T @ delta_pose)
 
             # Update points
-            params[6:] += delta_params[6:]
+            params[6:] += delta_points
             # update pose
             params[:6] = transMat2Vec(
-                vec2transMat(delta_params[:6]) @ vec2transMat(params[:6])
+                vec2transMat(delta_pose) @ vec2transMat(params[:6])
             )
+
+            # update damping factor
+            self.mu = max(1e-6, self.mu * 0.5)
 
             if iteration > 0:
                 print(f"Iteration {iteration}: Huber cost = {cost:.6f}")
 
-            if np.linalg.norm(delta_params[3:6]) < self.tol:
+            if np.linalg.norm(delta_pose) < self.tol:
                 print(
                     f"Converged at iteration {iteration}: cost difference below tolerance"
                 )
