@@ -73,25 +73,23 @@ class HandEyeCalibrationSimulator:
         with open(config_path, "r") as file:
             config = yaml.safe_load(file)
 
+        self.config = config
         self.output_dir = os.path.join(config["output_dir"], exp_name)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.num_poses = config["num_poses"]
         self.num_objects = config["num_objects"]
         self.resolution = config["resolution"]
-        self.camera_pose_method = config["cam_method"]
+        self.cam_method = config["cam_method"]
         self.size = config["size"]
-        self.max_samples = config["max_sample"]
-        self.SHAPENET_PATH = config["shapeNet_path"]
-        # self.categories = sorted(os.listdir(self.SHAPENET_PATH))
+        self.s_offset = 0.3
         self.categories = config["categories"]
-        self.use_chessboard = config["use_chessboard"]
+
+        # These will be defined later
         self.K = None
         self.ground_plane = None
         self.mesh_objects: List[bproc.types.MeshObject] = []
-
-        self.eye2hand_pose = random_se3(max_translation=0.1, max_rotation_deg=120)
+        self.eye2hand_pose = random_se3(max_translation=0.1, max_rotation_deg=180)
         self.base2world_pose = np.eye(4)
-        self.base2world_pose[:3, 3] = np.array([0.3, 0.4, 0.1])
+        self.base2world_pose[:3, 3] = np.random.rand(3)
 
         self.hand2base_poses = []
         self.eye2base_poses = []
@@ -138,7 +136,7 @@ class HandEyeCalibrationSimulator:
 
         # place a chessboard
         chessboard, protective_box = None, None
-        if self.use_chessboard:
+        if self.config["use_chessboard"]:
             chessboard = bproc.loader.load_obj("./chess.obj")[0]
             bounding_box = chessboard.get_bound_box()
             min_x, min_y, min_z = np.min(bounding_box, axis=0)
@@ -153,6 +151,7 @@ class HandEyeCalibrationSimulator:
             chessboard.set_rotation_euler([0, 0, np.pi / 2])
 
             updated_bounding_box = chessboard.get_bound_box()
+            print(updated_bounding_box)
             min_x, min_y, min_z = np.min(updated_bounding_box, axis=0)
             max_x, max_y, max_z = np.max(updated_bounding_box, axis=0)
 
@@ -182,8 +181,8 @@ class HandEyeCalibrationSimulator:
 
     def load_single_object(self):
         # Load a single object from ShapeNet for the scene
-        selected_synset = np.random.choice(self.categories)
-        category_path = os.path.join(self.SHAPENET_PATH, selected_synset)
+        selected_synset = np.random.choice(self.config["categories"])
+        category_path = os.path.join(self.config["shapeNet_path"], selected_synset)
         model_ids = [
             d
             for d in os.listdir(category_path)
@@ -301,33 +300,25 @@ class HandEyeCalibrationSimulator:
         bounce_light.set_energy(100)
         bounce_light.set_scale([4, 4, 1])  # Wide area light
 
-    def generate_camera_poses(self):
-        """Generate camera poses and corresponding robot hand poses based on the selected method.
-
-        Args:
-            objs: List of scene objects.
-        """
+    def generate_camera_poses(self, num_poses):
+        """Generate camera poses and corresponding robot hand poses based on the selected method."""
+        print("---" * 20)
+        print(f"Generating {num_poses} camera poses...")
         # Create BVH tree for collision detection
         bvh_tree = bproc.object.create_bvh_tree_multi_objects(self.mesh_objects)
 
         # Find point of interest, all cam poses should look towards it
         poi = bproc.object.compute_poi(self.mesh_objects)
 
-        if self.camera_pose_method == "random":
-            self._generate_random_camera_poses(bvh_tree, poi, self.num_poses)
-        elif self.camera_pose_method == "circle":
-            self._generate_circular_camera_poses(bvh_tree, poi)
+        if self.cam_method == "random":
+            self._generate_random_camera_poses(bvh_tree, poi, num_poses)
+        elif self.cam_method == "circle":
+            self._generate_circular_camera_poses(bvh_tree, poi, num_poses)
         else:
-            raise ValueError(f"Unknown camera pose method: {self.camera_pose_method}")
+            raise ValueError(f"Unknown camera pose method: {self.cam_method}")
 
     def _generate_random_camera_poses(self, bvh_tree, poi, num_poses):
-        """Generate random camera poses around the scene.
-
-        Args:
-            objs: List of scene objects.
-            bvh_tree: BVH tree for collision detection.
-            poi: Point of interest to look at.
-        """
+        """Generate random camera poses around the scene."""
         generated_poses = 0
         tries = 0
 
@@ -335,10 +326,9 @@ class HandEyeCalibrationSimulator:
             tries += 1
 
             # Sample random camera location above objects
-            offset = 0.8
             location = np.random.uniform(
-                [-self.size - offset, -self.size - offset, self.size * 2.0 - 0.2],
-                [self.size + offset, self.size + offset, self.size * 2.0 + 0.2],
+                [-self.size * 2, -self.size * 2, self.size * 2.0 - self.s_offset],
+                [self.size * 2, self.size * 2, self.size * 2.0 + self.s_offset],
             )
 
             # Random in-plane rotation (around viewing direction)
@@ -349,21 +339,15 @@ class HandEyeCalibrationSimulator:
             if self._add_camera_pose(location, inplane_rot, poi, bvh_tree):
                 generated_poses += 1
 
-    def _generate_circular_camera_poses(self, bvh_tree, poi):
-        """Generate camera poses in a circular pattern above the scene.
-
-        Args:
-            objs: List of scene objects.
-            bvh_tree: BVH tree for collision detection.
-            poi: Point of interest to look at.
-        """
+    def _generate_circular_camera_poses(self, bvh_tree, poi, num_poses):
+        """Generate camera poses in a circular pattern above the scene."""
         # Get ellipse parameters from camera_pose_params or use defaults
-        radius = self.size + 0.6
+        radius = self.size * 2.0
         height = self.size * 2.0
         center = poi.copy()
 
         # Generate evenly spaced angles
-        angles = np.linspace(0, 2 * np.pi, self.num_poses, endpoint=False)
+        angles = np.linspace(0, 2 * np.pi, num_poses, endpoint=False)
 
         generated_poses = 0
         for angle in angles:
@@ -371,7 +355,9 @@ class HandEyeCalibrationSimulator:
             x = center[0] + radius * np.cos(angle)
             y = center[1] + radius * np.sin(angle)
             z = height
-            location = np.array([x, y, z]) + np.random.uniform(-0.4, 0.4, 3)
+            location = np.array([x, y, z]) + np.random.uniform(
+                -self.s_offset, self.s_offset, 3
+            )
 
             # Random in-plane rotation for variety
             max_deg = 90  # Limit in-plane rotation to avoid extreme angles
@@ -382,26 +368,16 @@ class HandEyeCalibrationSimulator:
                 generated_poses += 1
 
         # If we couldn't generate enough poses, fill in with random ones
-        if generated_poses < self.num_poses:
+        if generated_poses < num_poses:
             print(
                 f"Could only generate {generated_poses} poses. Filling with random poses."
             )
             self._generate_random_camera_poses(
-                bvh_tree, poi, self.num_poses - generated_poses
+                bvh_tree, poi, num_poses - generated_poses
             )
 
     def _add_camera_pose(self, location, inplane_rot, poi, bvh_tree):
-        """Add a camera pose if it passes visibility checks.
-
-        Args:
-            location: Camera location.
-            inplane_rot: In-plane rotation.
-            poi: Point of interest to look at.
-            bvh_tree: BVH tree for collision detection.
-
-        Returns:
-            bool: True if the pose was added, False otherwise.
-        """
+        """Add a camera pose if it passes visibility checks."""
         # Compute rotation based on vector going from location towards poi
         rotation_matrix = bproc.camera.rotation_from_forward_vec(
             poi - location, inplane_rot=inplane_rot
@@ -441,46 +417,22 @@ class HandEyeCalibrationSimulator:
 
         return hand2base, eye2base
 
-    def save_intrinsics(self):
+    def save_intrinsics(self, save_dir):
         """Save camera intrinsics to a txt file."""
-        intrinsics_path = os.path.join(self.output_dir, "intrinsics.txt")
+        intrinsics_path = os.path.join(save_dir, "intrinsics.txt")
         np.savetxt(intrinsics_path, self.K, fmt="%.6f")
 
-    def save_eye2hand_pose(self):
+    def save_eye2hand_pose(self, save_dir):
         """Save ground truth eye2hand poses to txt files."""
-        pose_path = os.path.join(self.output_dir, f"eye2hand_pose.txt")
+        pose_path = os.path.join(save_dir, f"eye2hand_pose.txt")
         np.savetxt(pose_path, self.eye2hand_pose, fmt="%.6f")
 
-    def save_hand2base_poses_tum(self):
+    def save_hand2base_poses_tum(self, save_dir, data_range):
         """Save hand2base poses in TUM format to a single txt file."""
-        tum_path = os.path.join(self.output_dir, "hand_tum.txt")
+        tum_path = os.path.join(save_dir, "hand_tum.txt")
         with open(tum_path, "w") as f:
-            for i, pose in enumerate(self.hand2base_poses):
-                # Extract translation
+            for i, pose in enumerate(self.hand2base_poses[data_range]):
                 tx, ty, tz = pose[:3, 3]
-
-                # Extract rotation matrix and convert to quaternion
-                R = pose[:3, :3]
-                rot = Rotation.from_matrix(R)
-                qx, qy, qz, qw = rot.as_quat()  # Returns x, y, z, w
-
-                # Use frame index as timestamp
-                timestamp = float(i)
-
-                # Write to file in TUM format
-                f.write(
-                    f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
-                )
-
-    def save_eye2base_poses_tum(self):
-        """Save eye2base poses in TUM format to a single txt file."""
-        tum_path = os.path.join(self.output_dir, "eye_tum.txt")
-        with open(tum_path, "w") as f:
-            for i, pose in enumerate(self.eye2base_poses):
-                # Extract translation
-                tx, ty, tz = pose[:3, 3]
-
-                # Extract rotation matrix and convert to quaternion
                 R = pose[:3, :3]
                 rot = Rotation.from_matrix(R)
                 qx, qy, qz, qw = rot.as_quat()
@@ -489,19 +441,28 @@ class HandEyeCalibrationSimulator:
                     f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
                 )
 
-    def save_images(self, rendered_data):
-        """Save RGB, depth and normal images with sequential numbering.
+    def save_eye2base_poses_tum(self, save_dir, data_range):
+        """Save eye2base poses in TUM format to a single txt file."""
+        tum_path = os.path.join(save_dir, "eye_tum.txt")
+        with open(tum_path, "w") as f:
+            for i, pose in enumerate(self.eye2base_poses[data_range]):
+                tx, ty, tz = pose[:3, 3]
+                R = pose[:3, :3]
+                rot = Rotation.from_matrix(R)
+                qx, qy, qz, qw = rot.as_quat()
+                timestamp = float(i)
+                f.write(
+                    f"{timestamp:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n"
+                )
 
-        Args:
-            rendered_data: Dictionary containing rendered image data.
-        """
+    def save_images(self, rendered_data, save_dir, noise_levle, data_range):
+        """Save RGB images"""
         # Extract RGB images
-        img_dir = os.path.join(self.output_dir, "imgs")
+        img_dir = os.path.join(save_dir, "imgs")
         os.makedirs(img_dir, exist_ok=True)
         if "colors" in rendered_data:
             rgb_images = rendered_data["colors"]
-
-            for i, img_array in enumerate(rgb_images):
+            for i, img_array in enumerate(rgb_images[data_range]):
                 # Format index with leading zero
                 index = f"{i+1:02d}"
                 img_path = os.path.join(img_dir, f"{index}.png")
@@ -512,53 +473,68 @@ class HandEyeCalibrationSimulator:
                 # Add noise
                 from PIL import ImageFilter
 
-                img = img.filter(ImageFilter.GaussianBlur(radius=1.0))
+                img = img.filter(ImageFilter.GaussianBlur(radius=noise_levle))
                 img.save(img_path)
 
-    def render_and_save(self):
+    def render(self):
         """Render the scene and save all data in the required format."""
-        # Set renderer parameters for better quality
+        print("---" * 20)
         # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
         bproc.renderer.set_render_devices(
             desired_gpu_device_type="CUDA", desired_gpu_ids=[3]
         )
         bproc.renderer.set_noise_threshold(0.01)
-        bproc.renderer.set_max_amount_of_samples(self.max_samples)
+        bproc.renderer.set_max_amount_of_samples(self.config["max_sample"])
         bproc.renderer.set_cpu_threads(6)
         # bproc.renderer.enable_motion_blur(motion_blur_length=0.01)
 
         # Render the scene
         data = bproc.renderer.render()
+        return data
 
-        # Save RGB images
-        self.save_images(data)
-
-        # Save camera intrinsics
-        self.save_intrinsics()
-
-        # Save ground truth eye2hand pose
-        self.save_eye2hand_pose()
-        self.save_eye2base_poses_tum()
-
-        # Save hand2base poses in TUM format
-        self.save_hand2base_poses_tum()
+    def save(self, save_dir, noise_level, data, data_range):
+        """Save all data in the required format."""
+        os.makedirs(save_dir, exist_ok=True)
+        self.save_intrinsics(save_dir)
+        self.save_eye2hand_pose(save_dir)
+        self.save_hand2base_poses_tum(save_dir, data_range)
+        self.save_eye2base_poses_tum(save_dir, data_range)
+        self.save_images(data, save_dir, noise_level, data_range)
 
     def run_simulation(self):
         """Run the full simulation pipeline."""
         # Setup scene
         self.setup_scene()
 
-        # Generate camera and robot poses
-        self.generate_camera_poses()
+        # Noise test
+        num_pose = 10
+        noise_levels = [0, 0.5, 1.0]
+        self.generate_camera_poses(num_pose)
+        # Motion test
+        noise_level = 0.3
+        max_num_poses = 12
+        self.generate_camera_poses(max_num_poses)
 
-        # Render and save data
-        self.render_and_save()
+        data = self.render()
+
+        for i, sigma in enumerate(noise_levels):
+            self.save(
+                os.path.join(self.output_dir, f"noise_{sigma:.2f}"),
+                sigma,
+                data,
+                slice(0, num_pose),
+            )
+        self.save(
+            os.path.join(self.output_dir, f"motion"),
+            noise_level,
+            data,
+            slice(num_pose, num_pose + max_num_poses),
+        )
 
         return self.output_dir
 
 
 def main():
-    """Main function to run the hand-eye calibration simulation."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "config_path",

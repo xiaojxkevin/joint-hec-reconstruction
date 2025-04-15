@@ -12,7 +12,7 @@ from utils.visual import vis_scene
 from utils.ba import HandEyeBundleAdjustment
 
 
-def load_hand_poses(file_path: str, step: int) -> np.ndarray:
+def load_hand_poses(file_path: str, used_indices: np.ndarray) -> np.ndarray:
     """
     read transformations from hand to base from a TUM file
     """
@@ -21,14 +21,16 @@ def load_hand_poses(file_path: str, step: int) -> np.ndarray:
     if data.shape[1] != num_check:
         raise ValueError(f"Each line in the file should contain {num_check} elements.")
     hand_poses = geomu.tum2transformation(data)
-    return hand_poses[::step]
+    return hand_poses[used_indices]
 
 
 def jcr_run(
     config: dict,
 ):
 
-    hand2base_poses = load_hand_poses(config["hand_path"], step=config["step"])
+    hand2base_poses = load_hand_poses(
+        config["hand_path"], used_indices=config["used_ids"]
+    )
     base2hand_poses = np.asarray(
         [inv(pose) for pose in hand2base_poses], dtype=np.float64
     )
@@ -36,7 +38,7 @@ def jcr_run(
         input_dir=config["img_dir"],
         output_dir=os.path.join(config["exp_dir"], "colmap"),
         model_path=config["model_path"],
-        step=config["step"],
+        used_indices=config["used_ids"],
         intrinsics=config["K"],
     )
     assert (
@@ -169,6 +171,12 @@ def main():
         default="./results",
         help="Path to the folder that stores the output",
     )
+    parser.add_argument(
+        "--num_imgs",
+        type=int,
+        default=10,
+        help="The number of images used for calibration",
+    )
     args = parser.parse_args()
     with open(args.config_path, "r") as f:
         config = yaml.safe_load(f)
@@ -177,6 +185,7 @@ def main():
     config["exp_name"] = args.exp_name
     config["data_dir"] = args.data_dir
     config["out_dir"] = args.out_dir
+    config["num_imgs"] = args.num_imgs
     config["hand_path"] = os.path.join(
         config["data_dir"], args.exp_name, "hand_tum.txt"
     )
@@ -187,9 +196,20 @@ def main():
         if os.path.exists(intrinsic_path)
         else None
     )
-    num_imgs = len(os.listdir(config["img_dir"]))
-    config["num_imgs"] = (num_imgs - 1) // config["step"] + 1
-    print(f"Using {config['num_imgs']} images for calibration.")
+    total_num_imgs = len(os.listdir(config["img_dir"]))
+    if total_num_imgs < config["num_imgs"]:
+        raise ValueError(
+            f"Not enough images in {config['img_dir']}. Found {total_num_imgs}, but expected {config['num_imgs']}."
+        )
+    config["used_ids"] = np.sort(
+        np.random.choice(
+            np.arange(total_num_imgs), size=config["num_imgs"], replace=False
+        )
+    )
+    print(
+        f"Using {config['num_imgs']} images for calibration with indices:",
+        config["used_ids"],
+    )
 
     # The folder to store the results of the experiment
     config["exp_dir"] = os.path.join(

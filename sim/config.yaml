@@ -1,12 +1,13 @@
+shapeNet_path: /home/xiaojx/data/datasets/ShapeNetCoreV2/data
 output_dir: ./output/no_chessboard
-num_poses: 20
 num_objects: 7
 resolution:
   width: 640
   height: 480
-cam_method: random
+cam_method: circle
 size: 1.0
 max_sample: 1024
+use_chessboard: false
 categories: 
  - 02691156
  - "02747177"
@@ -22,5 +23,4 @@ categories:
  - 03636649
  - 03797390
  - 04074963
-use_chessboard: false
-shapeNet_path: /home/xiaojx/data/datasets/ShapeNetCoreV2/data
+

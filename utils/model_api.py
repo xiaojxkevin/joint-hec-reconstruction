@@ -30,20 +30,22 @@ from utils.colmap_utils import (
 from utils.math_op import inv
 
 
-def get_img_lists(img_dir: str, step: int) -> list:
+def get_img_lists(img_dir: str, used_indices: np.ndarray) -> list:
     # Return a sorted list of image paths (png, jpg, jpeg) limited to num_imgs
-    return [
-        os.path.join(img_dir, f)
-        for f in sorted(os.listdir(img_dir))
-        if re.match(r".*\.(png|jpg|jpeg)$", f)
-    ][::step]
+    return np.asarray(
+        [
+            os.path.join(img_dir, f)
+            for f in sorted(os.listdir(img_dir))
+            if re.match(r".*\.(png|jpg|jpeg)$", f)
+        ]
+    )[used_indices].tolist()
 
 
 def run_mast3r(
     input_dir: str,
     output_dir: str,
     model_path: str,
-    step: int,
+    used_indices: np.ndarray,
     intrinsics: np.ndarray = None,
     image_size: int = 512,
     device: str = "cuda",
@@ -73,7 +75,7 @@ def run_mast3r(
     model = AsymmetricMASt3R.from_pretrained(model_path).to(device)
 
     # Load images and generate a kapture data structure
-    img_path_lists = get_img_lists(input_dir, step)
+    img_path_lists = get_img_lists(input_dir, used_indices)
     img_relpath = [os.path.relpath(filename, input_dir) for filename in img_path_lists]
     imgs = load_images(img_path_lists, size=image_size)
 
