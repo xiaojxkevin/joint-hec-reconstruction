@@ -122,13 +122,17 @@ def extract_and_save_correspondences(reconstruction_path: str, output_file: str 
         break
 
     # 3D points
+    pts3d_idx = 0
     for i, (point3D_id, point3D) in enumerate(reconstruction.points3D.items()):
+        if float(point3D.error) > 2.0:
+            continue
         correspondences["points3D"][int(point3D_id)] = {
-            "sorted_id": i,
+            "sorted_id": pts3d_idx,
             "xyz": point3D.xyz.tolist(),
             "color": point3D.color.tolist(),
             "error": float(point3D.error),
         }
+        pts3d_idx += 1
 
     # Extract 2D-3D correspondences
     points2D = []

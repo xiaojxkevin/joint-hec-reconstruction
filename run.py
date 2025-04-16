@@ -46,6 +46,21 @@ def jcr_run(
     ), f"{hand2base_poses.shape[0]} != {eye2obj_poses.shape[0]}"
     pts, rgb_colors, pts_errors = points3D[:, :3], points3D[:, 3:6], points3D[:, 6]
 
+    raw_data = {
+        "K": K,
+        "eye2obj": eye2obj_poses,
+        "pts_in_obj": pts,
+        "pts_colors": rgb_colors,
+        "visibility": visibility,
+        "points2D": points2D,
+    }
+    np.savez(
+        os.path.join(
+            config["exp_dir"], f"{config['exp_name']}_{config['num_imgs']:02d}-raw"
+        ),
+        **raw_data,
+    )
+
     As, Bs = compute_As_Bs(eye2obj_poses, hand2base_poses)
 
     R_eye2hand, t_eye2hand, scale = solve_hand_eye_se3(
@@ -92,7 +107,7 @@ def jcr_run(
         os.path.join(config["exp_dir"], "init_scene.html"),
     )
     # For debugging: save the initial transformation matrices
-    raw_data = {
+    init_data = {
         "K": K,
         "eye2base": eye2base_poses,
         "hand2base": hand2base_poses,
@@ -101,7 +116,12 @@ def jcr_run(
         "visibility": visibility,
         "points2D": points2D,
     }
-    np.savez(os.path.join(config["exp_dir"], "raw.npz"), **raw_data)
+    np.savez(
+        os.path.join(
+            config["exp_dir"], f"{config['exp_name']}_{config['num_imgs']:02d}-init"
+        ),
+        **init_data,
+    )
 
     # Run bundle adjustment
     print(
@@ -143,7 +163,12 @@ def jcr_run(
         "visibility": visibility,
         "points2D": points2D,
     }
-    np.savez(os.path.join(config["exp_dir"], "final.npz"), **final_data)
+    np.savez(
+        os.path.join(
+            config["exp_dir"], f"{config['exp_name']}_{config['num_imgs']:02d}-final"
+        ),
+        **final_data,
+    )
     print("<>" * 20)
     print(f"All results are saved.")
 
@@ -174,7 +199,7 @@ def main():
     parser.add_argument(
         "--num_imgs",
         type=int,
-        default=10,
+        default=-1,
         help="The number of images used for calibration",
     )
     args = parser.parse_args()
@@ -185,7 +210,6 @@ def main():
     config["exp_name"] = args.exp_name
     config["data_dir"] = args.data_dir
     config["out_dir"] = args.out_dir
-    config["num_imgs"] = args.num_imgs
     config["hand_path"] = os.path.join(
         config["data_dir"], args.exp_name, "hand_tum.txt"
     )
@@ -197,6 +221,10 @@ def main():
         else None
     )
     total_num_imgs = len(os.listdir(config["img_dir"]))
+    if args.num_imgs == -1:
+        config["num_imgs"] = total_num_imgs
+    else:
+        config["num_imgs"] = args.num_imgs
     if total_num_imgs < config["num_imgs"]:
         raise ValueError(
             f"Not enough images in {config['img_dir']}. Found {total_num_imgs}, but expected {config['num_imgs']}."
