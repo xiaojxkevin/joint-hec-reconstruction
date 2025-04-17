@@ -2,6 +2,9 @@ import numpy as np
 import json
 import os
 import matplotlib.pyplot as plt
+from copy import deepcopy
+import seaborn as sns
+import pandas as pd
 
 
 def compute_translation_error(T_gt, T_est):
@@ -39,13 +42,11 @@ def compute_error(T_gt, T_est):
 
 
 def compute_errors(folder, num_tests):
-    motion_dict = (
-        {
-            "08": {"t": [], "R": []},
-            "10": {"t": [], "R": []},
-            "12": {"t": [], "R": []},
-        },
-    )
+    motion_dict = {
+        "08": {"t": [], "R": []},
+        "10": {"t": [], "R": []},
+        "12": {"t": [], "R": []},
+    }
     noise_dict = {
         "0.00": {"t": [], "R": []},
         "0.50": {"t": [], "R": []},
@@ -54,7 +55,7 @@ def compute_errors(folder, num_tests):
     }
     errors = {
         "init": {"motion": motion_dict, "noise": noise_dict},
-        "ba": {"motion": motion_dict, "noise": noise_dict},
+        "ba": {"motion": deepcopy(motion_dict), "noise": deepcopy(noise_dict)},
     }
     for i in range(num_tests):
         test_id = f"{i:03d}"
@@ -86,89 +87,77 @@ def compute_errors(folder, num_tests):
     return errors
 
 
-def plot_error_bars_two_phases(errors, cond, error_type="t"):
+def plot(errors, cond):
     """
-    Display error bar charts for both the init and ba phases under a specified condition in the same figure.
+    Display side-by-side violin plots of translation and rotation errors
+    for both init vs. BA phases under the given condition.
 
     Parameters:
-      errors: Dictionary storing all error data
-      cond: Specified condition, either "motion" or "noise"
-      error_type: Type of error to display, "t" for translation error, "R" for rotation error
+      errors:     dict storing error data, e.g. errors["init"]["motion"]["category"]["t"]
+      cond:       str, either "motion" or "noise"
     """
-    # Get sub-conditions, e.g., for motion: ["08", "10", "12"], for noise: ["0.00", "0.50", "1.00"]
-    categories = list(errors["init"][cond].keys())
+    # Build a long‑form DataFrame with columns: Category, Phase, Error, ErrorType
+    records = []
+    for phase in ("init", "ba"):
+        phase_label = "Initial" if phase == "init" else "BA"
+        for cat, data_dict in errors[phase][cond].items():
+            for etype, et_label in (("t", "Translation"), ("R", "Rotation")):
+                vals = data_dict.get(etype, [])
+                for v in vals:
+                    records.append(
+                        {
+                            "Category": cat,
+                            "Phase": phase_label,
+                            "Error": v,
+                            "ErrorType": et_label,
+                        }
+                    )
 
-    means_init, stds_init = [], []
-    means_ba, stds_ba = [], []
+    df = pd.DataFrame.from_records(records)
+    if df.empty:
+        raise ValueError(f"No error data found for condition '{cond}'")
 
-    for cat in categories:
-        # Data for the init phase
-        data_init = errors["init"][cond][cat][error_type]
-        if data_init:
-            means_init.append(np.mean(data_init))
-            stds_init.append(np.std(data_init))
-        else:
-            means_init.append(0)
-            stds_init.append(0)
+    # Determine x‑axis label based on condition
+    xlabel = "Number of motions" if cond == "motion" else "Gaussian noise level (sigma)"
 
-        # Data for the ba phase
-        data_ba = errors["ba"][cond][cat][error_type]
-        if data_ba:
-            means_ba.append(np.mean(data_ba))
-            stds_ba.append(np.std(data_ba))
-        else:
-            means_ba.append(0)
-            stds_ba.append(0)
+    # Prepare figure with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=False)
 
-    # Set bar chart parameters
-    x = np.arange(len(categories))
-    bar_width = 0.35
+    # Plot settings for each error type
+    for ax, (etype, ylabel) in zip(
+        axes,
+        [
+            ("Translation", "Translation Error (m)"),
+            ("Rotation", "Rotation Error (degrees)"),
+        ],
+    ):
+        subset = df[df["ErrorType"] == etype]
+        sns.violinplot(
+            x="Category",
+            y="Error",
+            hue="Phase",
+            data=subset,
+            split=True,
+            inner="quartile",
+            palette={"Initial": "skyblue", "BA": "salmon"},
+            cut=0,
+            ax=ax,
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{etype} Errors ({cond.capitalize()} Condition)")
+        ax.grid(axis="y", linestyle="--", alpha=0.5)
+        # only show legend on the first subplot
+        ax.legend(title="Phase")
 
-    plt.figure(figsize=(10, 6))
-
-    # Plot error bars for init and ba phases separately
-    plt.bar(
-        x - bar_width / 2,
-        means_init,
-        bar_width,
-        yerr=stds_init,
-        capsize=5,
-        alpha=0.7,
-        label="init",
-        color="skyblue",
-        edgecolor="black",
-    )
-    plt.bar(
-        x + bar_width / 2,
-        means_ba,
-        bar_width,
-        yerr=stds_ba,
-        capsize=5,
-        alpha=0.7,
-        label="ba",
-        color="salmon",
-        edgecolor="black",
-    )
-
-    # Set x-axis labels, title, and legend
-    plt.xticks(x, categories)
-    ylabel = (
-        "Translation Error (m)" if error_type == "t" else "Rotation Error (degrees)"
-    )
-    plt.xlabel(f"{cond} condition")
-    plt.ylabel(ylabel)
-    plt.title(f"Error in init and ba phases under {cond} condition")
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-    plt.legend()
-    plt.savefig(f"{cond}_{error_type}.png")
+    plt.tight_layout()
+    plt.savefig(f"{cond}.png")
 
 
 def main():
-    errors = compute_errors("no_chessboard", 20)
-    plot_error_bars_two_phases(errors, cond="motion", error_type="t")
-    plot_error_bars_two_phases(errors, cond="motion", error_type="R")
-    plot_error_bars_two_phases(errors, cond="noise", error_type="t")
-    plot_error_bars_two_phases(errors, cond="noise", error_type="R")
+    errors = compute_errors("no_chessboard", 50)
+    plot(errors, cond="motion")
+    plot(errors, cond="noise")
 
 
 if __name__ == "__main__":
