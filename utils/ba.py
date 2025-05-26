@@ -45,29 +45,26 @@ class HandEyeBundleAdjustment:
         self.total_params = 6 + self.n_points * 3
 
         self.huber_delta = 1.0  # Huber loss threshold
-        self.mu = 1e-2  # Regularization parameter in LM
+        self.mu = 1e-3  # Regularization parameter in LM
 
         self.max_it = max_it
         self.tol = tol
 
     def huber_loss(self, residuals):
-        abs_res = np.abs(residuals)
-        mask = abs_res <= self.huber_delta
-
-        # For |r| <= delta: r^2/2
-        # For |r| > delta: delta*(|r| - delta/2)
-        quadratic = 0.5 * residuals[mask] ** 2
-        linear = self.huber_delta * (abs_res[~mask] - 0.5 * self.huber_delta)
-
-        return np.sum(quadratic) + np.sum(linear)
+        square_res = residuals**2
+        mask = square_res <= self.huber_delta
+        loss1 = np.sum(square_res[mask])
+        loss2 = np.sum(
+            2.0 * self.huber_delta * np.abs(residuals[~mask]) - self.huber_delta**2
+        )
+        return loss1 + loss2
 
     def compute_weights(self, residuals):
-        abs_res = np.abs(residuals)
-        mask = abs_res <= self.huber_delta
-        abs_res[abs_res < 1e-6] = 1e-6  # Avoid division by zero
+        square_res = residuals**2
+        mask = square_res <= self.huber_delta
         weights = np.zeros_like(residuals)
         weights[mask] = 1.0
-        weights[~mask] = self.huber_delta / abs_res[~mask]
+        weights[~mask] = self.huber_delta / np.abs(residuals[~mask])
 
         n = len(residuals)
         return sparse.dia_matrix((weights, 0), shape=(n, n))
@@ -104,7 +101,7 @@ class HandEyeBundleAdjustment:
             vis_info = self.visibility[view_idx]
 
             #################################################################### residuals
-            # Find points can be viewd in this view
+            # Find points that can be viewd in the current view
             pts3d_indices = np.array(vis_info["pts3d_indices"])
             n_points_in_view = len(pts3d_indices)
             if n_points_in_view == 0:
@@ -222,12 +219,14 @@ class HandEyeBundleAdjustment:
         # Initial parameters
         hand2eye_params = transMat2Vec(self.hand2eye)
         params = np.concatenate([hand2eye_params, self.pts3d_in_base.ravel()])
+        prev_cost = np.inf
 
         # Optimization loop
         for iteration in range(1, self.max_it + 1):
             # Compute residuals
             residuals, J1, J2 = self.compute_residuals_and_jacobian(params)
-            cost = self.huber_loss(residuals)
+            huber_loss = self.huber_loss(residuals)
+            print(f"Iteration {iteration}: Huber loss = {huber_loss:.6f}")
 
             W = self.compute_weights(residuals)
             B: np.ndarray = J1.T @ W @ J1
@@ -251,18 +250,25 @@ class HandEyeBundleAdjustment:
             )
             delta_points = inv_C @ (g2 - E.T @ delta_pose)
 
+            # update damping factor
+            if iteration > 1:
+                cost = residuals.reshape((-1, 1)).T @ W @ residuals.reshape((-1, 1))
+                if cost < prev_cost:
+                    self.mu *= 0.1
+                    prev_cost = cost
+                else:
+                    print(
+                        f"!!!!! Iteration {iteration}: Cost did not decrease, increasing mu and do not update"
+                    )
+                    self.mu *= 10.0
+                    continue
+
             # Update points
             params[6:] += delta_points
             # update pose
             params[:6] = transMat2Vec(
                 vec2transMat(delta_pose) @ vec2transMat(params[:6])
             )
-
-            # update damping factor
-            self.mu = max(1e-6, self.mu * 0.5)
-
-            if iteration > 0:
-                print(f"Iteration {iteration}: Huber cost = {cost:.6f}")
 
             if np.linalg.norm(delta_pose) < self.tol:
                 print(

@@ -28,21 +28,35 @@ def skew(v: np.ndarray):
     ), f"Wrong shape: {v.shape}, should be (3,) or (3, 1)"
     v = v.reshape(3, 1)
     return np.array(
-        [[0, -v[2, 0], v[1, 0]], [v[2, 0], 0, -v[0, 0]], [-v[1, 0], v[0, 0], 0]],
-        dtype=np.float64,
+        [[0, -v[2, 0], v[1, 0]], [v[2, 0], 0, -v[0, 0]], [-v[1, 0], v[0, 0], 0]]
     )
 
 
-def _compute_left_Jac(rot_vec: np.ndarray):
+def _compute_left_Jac(rot_vec: np.ndarray) -> np.ndarray:
     theta = np.linalg.norm(rot_vec)
-    tol = 1e-6
+    tol = 1e-9
     if theta < tol:
         theta = tol
     n = rot_vec / theta
+    n_skew = skew(n)
     return (
-        np.sin(theta) / theta * np.eye(3)
-        + (1 - np.sin(theta) / theta) * np.outer(n, n)
-        + ((1 - np.cos(theta)) / theta) * skew(n)
+        np.eye(3)
+        + ((1 - np.cos(theta)) / theta) * n_skew
+        + (1 - np.sin(theta) / theta) * n_skew @ n_skew
+    )
+
+
+def _compute_right_Jac(rot_vec: np.ndarray) -> np.ndarray:
+    theta = np.linalg.norm(rot_vec)
+    tol = 1e-9
+    if theta < tol:
+        theta = tol
+    n = rot_vec / theta
+    n_skew = skew(n)
+    return (
+        np.eye(3)
+        - (theta / 2.0) * n_skew
+        + (1.0 - 0.5 * theta / np.tan(theta / 2.0)) * n_skew @ n_skew
     )
 
 
@@ -61,8 +75,8 @@ def transMat2Vec(T: np.ndarray):
     rot_vec = R.from_matrix(rot_matrix).as_rotvec()
 
     # Extrack translation vector
-    J = _compute_left_Jac(rot_vec)
-    trans_vec = np.linalg.solve(J, T[:3, 3])
+    G_inv = _compute_right_Jac(rot_vec)
+    trans_vec = (G_inv @ T[:3, 3].reshape(3, 1)).flatten()
 
     # Combine into parameter vector
     return np.concatenate([rot_vec, trans_vec])
@@ -83,70 +97,31 @@ def vec2transMat(params: np.ndarray):
     rot_matrix = R.from_rotvec(rot_vec).as_matrix()
 
     # Extract translation vector
-    J = _compute_left_Jac(rot_vec)
-    trans_vec = J @ params[3:6].reshape(3, 1)
+    G = _compute_left_Jac(rot_vec)
+    trans_vec = G @ params[3:6].reshape(3, 1)
 
     # Create transformation matrix
     T = np.eye(4)
     T[:3, :3] = rot_matrix
-    T[:3, 3] = trans_vec.reshape(
-        3,
-    )
+    T[:3, 3] = trans_vec.flatten()
 
     return T
 
 
-def minimize_L1_norm(A: np.ndarray, b: np.ndarray):
-    """
-    Minimizes the L1 norm of (b - A*x) using linear programming.
+if __name__ == "__main__":
+    N = 100
+    for _ in range(N):
+        T = np.eye(4)
+        T[:3, :3] = R.from_euler("xyz", np.random.uniform(-3, 3, size=(3,))).as_matrix()
+        T[:3, 3] = np.random.uniform(-10, 10, size=(3,))
+        # print("Original\n", T)
 
-    We introduce auxiliary variables t such that:
-        t_i >= |b_i - (A*x)_i|  for i = 1, ..., m,
-    and minimize sum_i t_i.
+        params = transMat2Vec(T)
+        # print("Parameter vector:", params)
 
-    This is formulated as:
-      minimize      sum_{i=1}^m t_i
-      subject to    A*x - t <=  b
-                    -A*x - t <= -b
-                    t >= 0
-    where x ∈ ℝⁿ and t ∈ ℝᵐ.
+        T_reconstructed = vec2transMat(params)
+        # print("Reconstructed transformation matrix:\n", T_reconstructed)
 
-    Parameters:
-      A : (m, n) numpy array
-      b : (m,) numpy array
-
-    Returns:
-      x_opt : optimal x vector (n,)
-      t_opt : optimal auxiliary variables (m,)
-      obj_val : minimum L1 norm value
-    """
-    m, n = A.shape
-
-    # Decision variables: [x_0, ..., x_{n-1}, t_0, ..., t_{m-1}]
-    # Objective: minimize sum(t_i) = [0, ..., 0, 1, ..., 1]
-    c = np.hstack([np.zeros(n), np.ones(m)])
-
-    # Constraint 1: A*x - t <= b
-    A2 = np.hstack([A, -np.eye(m)])
-    b2 = b
-
-    # Constraint 2: -A*x - t <= -b
-    A1 = np.hstack([-A, -np.eye(m)])
-    b1 = -b
-
-    # Combine constraints
-    A_ub = np.vstack([A1, A2])
-    b_ub = np.concatenate([b1, b2])
-
-    # Define bounds for x (unbounded) and t (non-negative)
-    bounds = [(None, None)] * n + [(0, None)] * m
-
-    # Solve the linear program using the HiGHS method
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
-
-    if res.success:
-        x_opt = res.x[:n]
-        t_opt = res.x[n:]
-        return x_opt, t_opt, res.fun
-    else:
-        raise ValueError("Linear programming failed: " + res.message)
+        error = np.linalg.norm(inv(T) @ T_reconstructed - np.eye(4))
+        if error > 1e-6:
+            print(f"Error too high: {error}")

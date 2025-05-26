@@ -8,58 +8,14 @@ def transform_pts_np(
     points: np.ndarray, transformation_matrix: np.ndarray
 ) -> np.ndarray:
     """
-    Apply a 4x4 transformation matrix to an array of 3D points.
-
-    [IN] points: numpy array of shape (n, 3) representing the point coordinates [x, y, z]
-    [IN] transformation_matrix: 4x4 numpy array representing the transformation matrix
-    [OUT] transformed_points: numpy array of shape (n, 3) representing the transformed coordinates [x', y', z']
+    Transform points using a transformation matrix.
     """
-    assert points.shape[1] == 3, "Invalid shape for points. Points should be (n, 3)."
-    # Convert points to homogeneous coordinates by appending a column of ones.
-    ones = np.ones((points.shape[0], 1))
-    points_homogeneous = np.hstack((points, ones))
-
-    # Apply the transformation using matrix multiplication.
-    # Note: We use transformation_matrix.T so that each point is transformed correctly.
-    transformed_points_homogeneous = points_homogeneous.dot(transformation_matrix.T)
-
-    # Convert back to Cartesian coordinates by taking the first three columns.
-    transformed_points = transformed_points_homogeneous[:, :3]
-
-    return transformed_points
-
-
-def transform_pts_tor(points: torch.Tensor, matrix: torch.Tensor):
-    """
-    Applies a transformation to a set of 3D points.
-    [IN] points: A torch tensor of size (n, 3) representing n 3D points.
-    [IN] matrix: A torch tensor of size (4, 4) representing the transformation matrix.
-    [OUT] A torch tensor of size (n, 3) of transformed 3D points.
-    """
-    # Check if the inputs are torch tensors
-    if not isinstance(points, torch.Tensor) or not isinstance(matrix, torch.Tensor):
-        raise ValueError("Both points and matrix must be torch.Tensor objects.")
-
-    # Check the shape of the points and the matrix
-    if points.shape[1] != 3 or matrix.shape != (4, 4):
-        raise ValueError(
-            "Invalid shape for points or matrix. Points should be (n, 3) and matrix should be (4, 4)."
-        )
-
-    # Add an extra dimension of ones to the points tensor to make it compatible with the transformation matrix
-    ones = torch.ones(points.shape[0], 1, dtype=points.dtype, device=points.device)
-    points_homogeneous = torch.cat(
-        [points, ones], dim=1
-    )  # Convert points to homogeneous coordinates
-
-    # Apply the transformation matrix to the points
-    transformed_points_homogeneous = torch.mm(
-        points_homogeneous, matrix.t()
-    )  # Multiply by the transpose of the matrix
-
-    # Convert back from homogeneous coordinates by dropping the last dimension
-    transformed_points = transformed_points_homogeneous[:, :3]
-
+    assert (
+        points.shape[1] == 3
+    ), f"Invalid shape {points.shape} for points. Points should be (n, 3)."
+    rotMat = transformation_matrix[:3, :3]
+    t = transformation_matrix[:3, 3]
+    transformed_points = points @ rotMat.T + t
     return transformed_points
 
 

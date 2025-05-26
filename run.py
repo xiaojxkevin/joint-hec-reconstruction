@@ -2,6 +2,8 @@ import os, torch
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import numpy as np
+
+np.random.seed(2810)
 import argparse
 import yaml
 from utils.model_api import run_mast3r
@@ -24,16 +26,14 @@ def load_hand_poses(file_path: str, used_indices: np.ndarray) -> np.ndarray:
     return hand_poses[used_indices]
 
 
-def jcr_run(
+def run(
     config: dict,
 ):
 
     hand2base_poses = load_hand_poses(
         config["hand_path"], used_indices=config["used_ids"]
     )
-    base2hand_poses = np.asarray(
-        [inv(pose) for pose in hand2base_poses], dtype=np.float64
-    )
+    base2hand_poses = np.asarray([inv(pose) for pose in hand2base_poses])
     K, eye2obj_poses, points3D, points2D, visibility = run_mast3r(
         input_dir=config["img_dir"],
         output_dir=os.path.join(config["exp_dir"], "colmap"),
@@ -74,7 +74,7 @@ def jcr_run(
     print("R_eye2hand:\n", R_eye2hand)
     print("t_eye2hand: ", t_eye2hand)
     print("scale: ", scale)
-    T_eye2hand = np.eye(4, dtype=np.float64)
+    T_eye2hand = np.eye(4)
     T_eye2hand[:3, :3] = R_eye2hand
     T_eye2hand[:3, 3] = t_eye2hand
     np.savetxt(
@@ -84,7 +84,7 @@ def jcr_run(
     pts *= scale
     eye2obj_poses[:, :3, 3] *= scale
     eye2base_poses = hand2base_poses @ T_eye2hand
-    obj2eye_poses = np.asarray([inv(pose) for pose in eye2obj_poses], dtype=np.float64)
+    obj2eye_poses = np.asarray([inv(pose) for pose in eye2obj_poses])
     idx = 0
     pts_in_base = geomu.transform_pts_np(pts, eye2base_poses[idx] @ obj2eye_poses[idx])
 
@@ -174,6 +174,7 @@ def jcr_run(
 
 
 def main():
+    ########################################## Parse arguments
     parser = argparse.ArgumentParser(
         description="Joint Hand-eye Calibration and Reconstruction"
     )
@@ -203,6 +204,8 @@ def main():
         help="The number of images used for calibration",
     )
     args = parser.parse_args()
+
+    ########################################### Load config
     with open(args.config_path, "r") as f:
         config = yaml.safe_load(f)
 
@@ -247,7 +250,7 @@ def main():
     print("Working on ", config["exp_dir"])
 
     # Start joint calibration and reconstruction
-    jcr_run(config)
+    run(config)
 
 
 if __name__ == "__main__":

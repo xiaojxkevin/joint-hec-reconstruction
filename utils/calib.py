@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 from scipy.linalg import svd, lstsq, solve
-from utils.math_op import skew, inv, minimize_L1_norm
+from utils.math_op import skew, inv
 
 
 def compute_As_Bs(eye2obj_poses: np.ndarray, hand2base_poses: np.ndarray):
@@ -14,8 +14,8 @@ def compute_As_Bs(eye2obj_poses: np.ndarray, hand2base_poses: np.ndarray):
         hand_pair = hand2base_poses[i - 1], hand2base_poses[i]
         As.append(inv(hand_pair[0]) @ hand_pair[1])
         Bs.append(inv(eye_pair[0]) @ eye_pair[1])
-    As = np.asarray(As, dtype=np.float64)
-    Bs = np.asarray(Bs, dtype=np.float64)
+    As = np.asarray(As)
+    Bs = np.asarray(Bs)
     return As, Bs
 
 
@@ -51,7 +51,7 @@ def solve_hand_eye_se3(
         tB_skew = skew(tB_i)
         # Compute C_i and d_i.
         RA_i = As[i, :3, :3]
-        Ci = tB_skew @ R_X.T @ (np.eye(3, dtype=np.float64) - RA_i)
+        Ci = tB_skew @ R_X.T @ (np.eye(3) - RA_i)
         di = tB_skew @ R_X.T @ tA_i
         C.append(Ci)
         d.append(di.reshape(-1, 1))  # Ensure the vector is a column vector.
@@ -121,7 +121,7 @@ def solve_hand_eye_se3(
 
 def retrive_rotation(As: np.ndarray, Bs: np.ndarray):
     n = As.shape[0]
-    M = np.zeros((3, 3), dtype=np.float64)
+    M = np.zeros((3, 3))
     for i in range(n):
         # Extract the rotation matrices from A_i and B_i.
         RA_i = As[i, :3, :3]
