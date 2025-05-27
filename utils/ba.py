@@ -115,16 +115,29 @@ class HandEyeBundleAdjustment:
             y = P_e[:, 1]
             z = P_e[:, 2]
 
-            # Project points to image plane
+            # Normalize 2d points
+            pts2d_used = self.pts2d[vis_info["pts2d_indices"]]
+            mean_pts2d = np.mean(pts2d_used, axis=0)
+            std_pts2d = np.std(pts2d_used, axis=0)
+            s_pts2d = np.sqrt(2.0 / (np.sum(std_pts2d**2) + 1e-6))
+            Q_R = np.eye(2) * s_pts2d
+            Q_t = -s_pts2d * mean_pts2d
+            tilde_pts2d = pts2d_used @ Q_R.T + Q_t
+
+            # Adjust intrinsics
+            fx, fy = self.fx * s_pts2d, self.fy * s_pts2d
+            cx = s_pts2d * (self.cx - mean_pts2d[0])
+            cy = s_pts2d * (self.cy - mean_pts2d[1])
+
+            # Project points to 2D
             pts2d_projected = np.column_stack(
                 [
-                    self.fx * x / z + self.cx,
-                    self.fy * y / z + self.cy,
+                    fx * x / z + cx,
+                    fy * y / z + cy,
                 ]
             )  # (n, 2)
-            pts2d_used = self.pts2d[vis_info["pts2d_indices"]]
             residuals[residual_idx : residual_idx + 2 * n_points_in_view] = (
-                pts2d_projected - pts2d_used
+                pts2d_projected - tilde_pts2d
             ).ravel()
 
             if not compute_jacobian:
@@ -132,7 +145,6 @@ class HandEyeBundleAdjustment:
                 continue
 
             #################################################################### J1
-            fx, fy = self.fx, self.fy
             J_xi_part1 = np.stack(
                 [
                     -fx * x * y / z**2,
