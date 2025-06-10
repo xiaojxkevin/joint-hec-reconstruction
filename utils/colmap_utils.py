@@ -46,7 +46,7 @@ def kapture_import_image_folder_or_list(
         camera_type = kapture.CameraType.PINHOLE
     else:
         # TODO check the type of the camera
-        raise NotImplementedError()
+        raise NotImplementedError("Camera intrinsics are not provided.")
         model_params = [width, height]
         camera_type = kapture.CameraType.UNKNOWN_CAMERA
 
