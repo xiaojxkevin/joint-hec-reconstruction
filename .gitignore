@@ -1,0 +1,7 @@
+*.pyc
+result
+output
+private
+data
+.vscode
+results
