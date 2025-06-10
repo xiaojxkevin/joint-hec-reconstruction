@@ -27,8 +27,7 @@ def load_hand_poses(file_path: str, used_indices: np.ndarray) -> np.ndarray:
 
 
 class JointReconstructCalib:
-    def __init__(
-        self, cfg_path: str, data_dir: str, out_dir: str, num_imgs=-1) -> None:
+    def __init__(self, cfg_path: str, data_dir: str, out_dir: str, num_imgs=-1) -> None:
         with open(cfg_path, "r") as f:
             config = yaml.safe_load(f)
         config["data_dir"] = data_dir
@@ -64,13 +63,19 @@ class JointReconstructCalib:
 
         # Save folder
         exp_name = data_dir.split("/")[-1]
-        self.save_dir = os.path.join(config["out_dir"], exp_name, f"{config['num_imgs']:02d}_imgs")
+        self.save_dir = os.path.join(
+            config["out_dir"], exp_name, f"{config['num_imgs']:02d}_imgs"
+        )
         os.makedirs(self.save_dir, exist_ok=True)
         self.exp_name = exp_name
 
+        # Save configuration
         self.cfg = config
 
     def run(self):
+        # Save used indices
+        np.save(os.path.join(self.save_dir, "used_indices.npy"), self.cfg["used_ids"])
+
         # Hand
         hand2base_poses = load_hand_poses(
             self.cfg["hand_path"], used_indices=self.cfg["used_ids"]
@@ -99,10 +104,19 @@ class JointReconstructCalib:
             "visibility": visibility,
             "points2D": points2D,
         }
-        np.savez(os.path.join(self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_raw"), **raw_data)
+        np.savez(
+            os.path.join(
+                self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_raw"
+            ),
+            **raw_data,
+        )
 
         # Solve AX=XB
-        eq_solver =  EqSolver(cfg=self.cfg, eye2world_poses=eye2world_poses, hand2base_poses=hand2base_poses)
+        eq_solver = EqSolver(
+            cfg=self.cfg,
+            eye2world_poses=eye2world_poses,
+            hand2base_poses=hand2base_poses,
+        )
         R_eye2hand, t_eye2hand, scale = eq_solver.solve()
         print("<>" * 20)
         T_eye2hand = np.eye(4)
@@ -111,9 +125,8 @@ class JointReconstructCalib:
         print("T_eye2hand:\n", T_eye2hand)
         print("scale: ", scale)
         np.savetxt(
-            os.path.join(self.save_dir, "init_T_eye2hand.txt"),
-            T_eye2hand,
-            fmt="%.6f")
+            os.path.join(self.save_dir, "init_T_eye2hand.txt"), T_eye2hand, fmt="%.6f"
+        )
 
         # Fix scale and transform points to base frame
         pts *= scale
@@ -153,7 +166,12 @@ class JointReconstructCalib:
             "visibility": visibility,
             "points2D": points2D,
         }
-        np.savez(os.path.join(self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_init"), **init_data)
+        np.savez(
+            os.path.join(
+                self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_init"
+            ),
+            **init_data,
+        )
 
         # Run bundle adjustment
         print(
@@ -193,19 +211,22 @@ class JointReconstructCalib:
             "visibility": visibility,
             "points2D": points2D,
         }
-        np.savez(os.path.join(self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_final.npz"), **final_data)
+        np.savez(
+            os.path.join(
+                self.save_dir, f"{self.exp_name}_{self.cfg['num_imgs']:02d}_final.npz"
+            ),
+            **final_data,
+        )
         print("<>" * 20)
         print(f"All results are saved.")
 
 
 def main():
     cfg_path = "config/calib.yaml"
-    
+
     data_dir = "data/easyscene"
     out_dir = "results"
-    sys = JointReconstructCalib(
-        cfg_path=cfg_path, data_dir=data_dir, out_dir=out_dir
-    )
+    sys = JointReconstructCalib(cfg_path=cfg_path, data_dir=data_dir, out_dir=out_dir)
     sys.run()
 
 
