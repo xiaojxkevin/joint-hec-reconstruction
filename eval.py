@@ -1,163 +1,172 @@
-import numpy as np
-import json
 import os
+import numpy as np
 import matplotlib.pyplot as plt
-from copy import deepcopy
 import seaborn as sns
 import pandas as pd
+from scipy.spatial.transform import Rotation as R
+
+# ——— USER: point this at your ground‐truth directory ———
+GT_ROOT = "data/no_chessboard"  # e.g. mirrors results/no_chessboard structure
+gt_filename = "eye2hand_pose.txt"  # or "gt_T_eye2hand.txt", etc.
+# ——————————————————————————————————————————————
+
+
+def load_pose(path):
+    return np.loadtxt(path)
 
 
 def compute_translation_error(T_gt, T_est):
-    """
-    Computes the Euclidean distance between the translation components of two poses.
-    """
-    t_gt = T_gt[0:3, 3]
-    t_est = T_est[0:3, 3]
-    error = np.linalg.norm(t_gt - t_est)
-    return error
+    return np.linalg.norm(T_gt[:3, 3] - T_est[:3, 3])
 
 
 def compute_rotation_error(T_gt, T_est):
-    """
-    Computes the angular difference between the rotation parts of two poses.
-    """
-    R_gt = T_gt[0:3, 0:3]
-    R_est = T_est[0:3, 0:3]
-    # Relative rotation matrix
-    R_diff = R_gt.T @ R_est
-    from scipy.spatial.transform import Rotation as R
-
-    vec = R.from_matrix(R_diff).as_rotvec()
-    angle = np.linalg.norm(vec)
+    R_diff = T_gt[:3, :3].T @ T_est[:3, :3]
+    angle = np.linalg.norm(R.from_matrix(R_diff).as_rotvec())
     return np.degrees(angle)
 
 
-def compute_error(T_gt, T_est):
+def compute_all_errors():
     """
-    Computes the translation and rotation errors between two poses.
+    Walks results/no_chessboard/…/<test_id>/<img_folder>/init_T… and ba_T…
+    and compares to GT_ROOT/…/<test_id>/<img_folder>/{gt_filename}
     """
-    t_error = compute_translation_error(T_gt, T_est)
-    R_error = compute_rotation_error(T_gt, T_est)
-    return t_error, R_error
-
-
-def compute_errors(folder, num_tests):
-    motion_dict = {
-        "08": {"t": [], "R": []},
-        "10": {"t": [], "R": []},
-        "12": {"t": [], "R": []},
-    }
-    noise_dict = {
-        "0.00": {"t": [], "R": []},
-        "0.50": {"t": [], "R": []},
-        "1.00": {"t": [], "R": []},
-        "1.50": {"t": [], "R": []},
-    }
-    errors = {
-        "init": {"motion": motion_dict, "noise": noise_dict},
-        "ba": {"motion": deepcopy(motion_dict), "noise": deepcopy(noise_dict)},
-    }
-    for i in range(num_tests):
-        test_id = f"{i:03d}"
-        gt_path = os.path.join(
-            f"data/{folder}",
-            test_id,
-            "motion",
-            "eye2hand_pose.txt",
-        )
-        for phase in errors.keys():
-            for cond in errors[phase].keys():
-                for subcond in errors[phase][cond].keys():
-                    if cond == "noise":
-                        suffix = f"{subcond}_12"
-                    else:
-                        suffix = subcond
-
-                    pre_path = os.path.join(
-                        f"results/{folder}",
-                        test_id,
-                        f"{cond}_{suffix}",
-                        f"{phase}_T_eye2hand.txt",
-                    )
-                    gt_pose = np.loadtxt(gt_path)
-                    pre_pose = np.loadtxt(pre_path)
-                    t_error, R_error = compute_error(gt_pose, pre_pose)
-                    errors[phase][cond][subcond]["t"].append(t_error)
-                    errors[phase][cond][subcond]["R"].append(R_error)
-    return errors
-
-
-def plot(errors, cond):
-    """
-    Display side-by-side violin plots of translation and rotation errors
-    for both init vs. BA phases under the given condition.
-
-    Parameters:
-      errors:     dict storing error data, e.g. errors["init"]["motion"]["category"]["t"]
-      cond:       str, either "motion" or "noise"
-    """
-    # Build a long‑form DataFrame with columns: Category, Phase, Error, ErrorType
     records = []
-    for phase in ("init", "ba"):
-        phase_label = "Initial" if phase == "init" else "BA"
-        for cat, data_dict in errors[phase][cond].items():
-            for etype, et_label in (("t", "Translation"), ("R", "Rotation")):
-                vals = data_dict.get(etype, [])
-                for v in vals:
-                    records.append(
-                        {
-                            "Category": cat,
-                            "Phase": phase_label,
-                            "Error": v,
-                            "ErrorType": et_label,
-                        }
-                    )
+    base = "results/no_chessboard"
+    for combo in sorted(os.listdir(base)):  # e.g. indoor-marble-3_objs
+        combo_dir = os.path.join(base, combo)
+        print("reading")
+        if not os.path.isdir(combo_dir):
+            continue
 
-    df = pd.DataFrame.from_records(records)
-    if df.empty:
-        raise ValueError(f"No error data found for condition '{cond}'")
+        for test_id in sorted(os.listdir(combo_dir)):  # 01-50
+            test_dir = os.path.join(combo_dir, test_id)
+            if not os.path.isdir(test_dir):
+                continue
 
-    # Determine x‑axis label based on condition
-    xlabel = "Number of motions" if cond == "motion" else "Gaussian noise level (sigma)"
+            for img_folder in sorted(os.listdir(test_dir)):  # e.g. 06_imgs
+                if not img_folder.endswith("_imgs"):
+                    continue
+                img_dir = os.path.join(test_dir, img_folder)
 
-    # Prepare figure with two subplots
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=False)
+                # paths
+                gt_path = os.path.join(GT_ROOT, combo, test_id, gt_filename)
+                init_path = os.path.join(img_dir, "init_T_eye2hand.txt")
+                ba_path = os.path.join(img_dir, "ba_T_eye2hand.txt")
 
-    # Plot settings for each error type
-    for ax, (etype, ylabel) in zip(
-        axes,
-        [
-            ("Translation", "Translation Error (m)"),
-            ("Rotation", "Rotation Error (degrees)"),
-        ],
+                if not (
+                    os.path.exists(gt_path)
+                    and os.path.exists(init_path)
+                    and os.path.exists(ba_path)
+                ):
+                    print(f"Skipping missing: {combo}/{test_id}/{img_folder}")
+                    continue
+
+                T_gt = load_pose(gt_path)
+                T_init = load_pose(init_path)
+                T_ba = load_pose(ba_path)
+
+                t_init = compute_translation_error(T_gt, T_init)
+                r_init = compute_rotation_error(T_gt, T_init)
+                t_ba = compute_translation_error(T_gt, T_ba)
+                r_ba = compute_rotation_error(T_gt, T_ba)
+
+                # improvement: (init - ba) / init
+                imp_t = (t_init - t_ba) / t_init if t_init != 0 else np.nan
+                imp_r = (r_init - r_ba) / r_init if r_init != 0 else np.nan
+
+                records.append(
+                    {
+                        "combo": combo,
+                        "test_id": test_id,
+                        "images": int(img_folder.split("_")[0]),  # 6,7,8,9,10
+                        "phase": "init",
+                        "t_error": t_init,
+                        "r_error": r_init,
+                        "imp_t": imp_t,
+                        "imp_r": imp_r,
+                    }
+                )
+                records.append(
+                    {
+                        "combo": combo,
+                        "test_id": test_id,
+                        "images": int(img_folder.split("_")[0]),
+                        "phase": "ba",
+                        "t_error": t_ba,
+                        "r_error": r_ba,
+                        "imp_t": imp_t,
+                        "imp_r": imp_r,
+                    }
+                )
+
+    return pd.DataFrame(records)
+
+
+def plot_errors(df):
+    sns.set_theme(style="whitegrid")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 7), sharex=True)
+
+    for ax, (err_type, ylabel) in zip(
+        axes, [("t_error", "Translation Error (m)"), ("r_error", "Rotation Error (°)")]
     ):
-        subset = df[df["ErrorType"] == etype]
-        sns.violinplot(
-            x="Category",
-            y="Error",
-            hue="Phase",
-            data=subset,
-            split=True,
-            inner="quartile",
-            palette={"Initial": "skyblue", "BA": "salmon"},
-            cut=0,
+        sns.boxplot(
+            x="images",
+            y=err_type,
+            hue="phase",
+            data=df,
             ax=ax,
+            width=0.7,
+            fliersize=2.0,
         )
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel("Number of Used Images")
         ax.set_ylabel(ylabel)
-        ax.set_title(f"{etype} Errors ({cond.capitalize()} Condition)")
-        ax.grid(axis="y", linestyle="--", alpha=0.5)
-        # only show legend on the first subplot
-        ax.legend(title="Phase")
+        ax.set_title(ylabel)
+        ax.legend()
 
     plt.tight_layout()
-    plt.savefig(f"{cond}.png")
+    plt.savefig(f"error_boxplot.svg")
+    plt.close()
+
+
+def plot_improvements(df):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+
+    df_imp = df[df.phase == "ba"].copy()
+    for imp_col, ylabel in [
+        ("imp_t", "Translation Improvement"),
+        ("imp_r", "Rotation Improvement"),
+    ]:
+        plt.figure(figsize=(8, 6))
+        ax = sns.boxplot(
+            x="images",
+            y=imp_col,
+            data=df_imp,
+            palette="coolwarm",
+        )
+        ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        ax.set_xlabel("Number of Used Images")
+        ax.set_ylabel(ylabel + "%")
+        ax.set_title(f"Percentage of {ylabel} after BA")
+        plt.tight_layout()
+        plt.savefig(f"improvement_{imp_col}.svg")
+        plt.close()
 
 
 def main():
-    errors = compute_errors("no_chessboard", 50)
-    plot(errors, cond="motion")
-    plot(errors, cond="noise")
+    # df = compute_all_errors()
+    # if df.empty:
+    #     raise RuntimeError("No data found—check your paths!")
+    # df.to_csv("./out", index=False)
+
+    df = pd.read_csv("./out")
+    plot_errors(df)
+    # plot_improvements(df)
+    print(
+        "Saved: error_t_error.svg, error_r_error.svg, improvement_t.svg, improvement_r.svg"
+    )
 
 
 if __name__ == "__main__":
