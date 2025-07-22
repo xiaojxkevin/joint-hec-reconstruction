@@ -1,6 +1,9 @@
 model_path: "./mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
-use_ransac: True
-ransac_inlier_ratio: 0.75
-ransac_error_threshold: 0.01
+ransac:
+  use_ransac: True
+  max_iters: 100
+  inlier_ratio: 0.5
+  error_threshold: 0.01
+  min_samples: 2
 ba_max_iter: 10
 ba_tolerance: 0.001
