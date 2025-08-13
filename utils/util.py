@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 
@@ -41,7 +40,7 @@ def tum2transformation(data: np.ndarray):
 
         transformations.append(transform)
 
-    return np.array(transformations, dtype=np.float32)
+    return np.array(transformations)
 
 
 def matrices_to_tum(

@@ -1,4 +1,5 @@
 import numpy as np
+import logging
 from scipy.spatial.transform import Rotation
 from scipy.linalg import svd, lstsq
 from utils.math_op import skew, inv
@@ -25,6 +26,7 @@ class AXXBSolver:
         self.inlier_ratio = cfg["ransac"].get("inlier_ratio", 0.75)
         self.error_threshold = cfg["ransac"].get("error_threshold", 1e-2)
         self.min_samples = cfg["ransac"].get("min_samples", 2)
+        self.logger = logging.getLogger("hand_eye_calibration")
 
     def retrive_rotation(self, As: np.ndarray, Bs: np.ndarray) -> np.ndarray:
         n = As.shape[0]
@@ -45,8 +47,8 @@ class AXXBSolver:
         # Ensure the determinant is +1 (if it's a reflection, adjust Vt).
         # https://github.com/opencv/opencv/blob/4.x/modules/calib3d/src/calibration_handeye.cpp#L542
         if np.linalg.det(R_X) < 0:
-            print(
-                "[INFO] Reflection detected. Adjusting the sign of the last row of Vt."
+            self.logger.warning(
+                "Reflection detected. Adjusting the sign of the last row of Vt"
             )
             Vt[-1, :] *= -1
             R_X = U @ Vt
@@ -141,13 +143,13 @@ class AXXBSolver:
 
             # Refit using all inliers
             if len(best_inliers) >= max(threshold_num, 2):
-                print(f"[INFO] RANSAC found {len(best_inliers)} inliers.")
+                self.logger.info("RANSAC found %s inliers.", len(best_inliers))
                 C_inliers = np.vstack([C[i] for i in best_inliers])
                 d_inliers = np.vstack([d[i] for i in best_inliers])
                 t_X, residues, _, s = lstsq(C_inliers, d_inliers, check_finite=False)
 
         if t_X is None:
-            print("[INFO] use all data to solve for t_X")
+            self.logger.info("All data are used to solve for t_X")
             # Use all data to solve for t_X
             # Solve the linear system C * t_X = d
             C_stack = np.vstack(C)
