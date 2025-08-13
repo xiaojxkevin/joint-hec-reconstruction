@@ -188,8 +188,7 @@ class JointReconstructCalib:
             pts3d_in_base=pts_in_base,
             pts2d=points2D,
             visibility=visibility,
-            max_it=self.cfg["ba_max_iter"],
-            tol=self.cfg["ba_tolerance"],
+            cfg=self.cfg,
         )
         optimized_eye2hand, optimized_points = ba.run_bundle_adjustment()
         np.savetxt(

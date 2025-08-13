@@ -1,7 +1,7 @@
 import numpy as np
 import scipy
 import scipy.sparse as sparse
-import scipy.sparse.linalg as slinalg
+import logging
 import time
 from typing import Dict, List, Tuple, Any
 from utils.math_op import inv, skew, transMat2Vec, vec2transMat
@@ -21,8 +21,7 @@ class HandEyeBundleAdjustment:
         pts3d_in_base: np.ndarray,
         pts2d: np.ndarray,
         visibility: np.ndarray,
-        max_it: int = 10,
-        tol: float = 1e-6,
+        cfg: dict,
     ):
         """ """
         self.fx, self.fy, self.cx, self.cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
@@ -43,12 +42,12 @@ class HandEyeBundleAdjustment:
 
         # Total parameters: 6 for hand2eye + 3 for each 3D point
         self.total_params = 6 + self.n_points * 3
+        self.huber_delta = cfg["ba"]["huber_delta"]
+        self.mu = cfg["ba"]["damping_factor"]
+        self.max_it = cfg["ba"]["max_iter"]
+        self.tol = cfg["ba"]["tolerance"]
 
-        self.huber_delta = 1.0  # Huber loss threshold
-        self.mu = 1e-3  # Regularization parameter in LM
-
-        self.max_it = max_it
-        self.tol = tol
+        self.logger = logging.getLogger("calibration_run")
 
     def huber_loss(self, residuals):
         square_res = residuals**2
@@ -238,7 +237,7 @@ class HandEyeBundleAdjustment:
             # Compute residuals
             residuals, J1, J2 = self.compute_residuals_and_jacobian(params)
             huber_loss = self.huber_loss(residuals)
-            print(f"Iteration {iteration}: Huber loss = {huber_loss:.6f}")
+            self.logger.info("Iteration %d: Huber loss = %.6f", iteration, huber_loss)
 
             W = self.compute_weights(residuals)
             B: np.ndarray = J1.T @ W @ J1
@@ -269,8 +268,9 @@ class HandEyeBundleAdjustment:
                     self.mu *= 0.1
                     prev_cost = cost
                 else:
-                    print(
-                        f"!!!!! Iteration {iteration}: Cost did not decrease, increasing mu and do not update"
+                    self.logger.warning(
+                        "!!!!! Iteration %d: Cost did not decrease, increasing mu and do not update",
+                        iteration,
                     )
                     self.mu *= 10.0
                     continue
@@ -283,8 +283,9 @@ class HandEyeBundleAdjustment:
             )
 
             if np.linalg.norm(delta_pose) < self.tol:
-                print(
-                    f"Converged at iteration {iteration}: cost difference below tolerance"
+                self.logger.info(
+                    "Converged at iteration %d: cost difference below tolerance",
+                    iteration,
                 )
                 break
 
@@ -312,12 +313,4 @@ class HandEyeBundleAdjustment:
 
 
 if __name__ == "__main__":
-    from utils.colmap_utils import extract_and_save_correspondences, process_colmap_data
-
-    exp_name = "000_10"
-    colmap_correspondence_path = (
-        f"results/no_chessboard/{exp_name}/colmap/colmap_raw.json"
-    )
-    hand2base_path = f"./data/no_chessboard/{exp_name}/hand_tum.txt"
-    reconstruction_folder = f"results/no_chessboard/{exp_name}/colmap/reconstruction/0"
-    output_file = None
+    pass

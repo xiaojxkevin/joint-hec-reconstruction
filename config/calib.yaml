@@ -5,5 +5,8 @@ ransac:
   inlier_ratio: 0.5
   error_threshold: 0.01
   min_samples: 2
-ba_max_iter: 10
-ba_tolerance: 0.001
+ba:
+  max_iter: 10
+  tolerance: 0.001
+  huber_delta: 1.0 # Huber loss threshold
+  damping_factor: 0.001 # Regularization parameter in LM
