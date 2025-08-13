@@ -1,17 +1,17 @@
 import os, torch
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import numpy as np
-
-np.random.seed(2810)
 import argparse
 import yaml
-from utils.model_api import MAST3R_COLMAP
-import utils.geometric_util as geomu
+import logging
+from utils.mast3r_colmap import MAST3R_COLMAP
+import utils.util as util_pkg
 from utils.math_op import inv
-from utils.calib import EqSolver
+from utils.solver import AXXBSolver
 from utils.visual import vis_scene
 from utils.ba import HandEyeBundleAdjustment
+from utils.logger import LoggerSetup
 
 
 def load_hand_poses(file_path: str, used_indices: np.ndarray) -> np.ndarray:
@@ -22,12 +22,22 @@ def load_hand_poses(file_path: str, used_indices: np.ndarray) -> np.ndarray:
     num_check = 8
     if data.shape[1] != num_check:
         raise ValueError(f"Each line in the file should contain {num_check} elements.")
-    hand_poses = geomu.tum2transformation(data)
+    hand_poses = util_pkg.tum2transformation(data)
     return hand_poses[used_indices]
 
 
 class JointReconstructCalib:
-    def __init__(self, cfg_path: str, data_dir: str, out_dir: str, num_imgs=-1) -> None:
+    def __init__(
+        self,
+        cfg_path: str,
+        data_dir: str,
+        out_dir: str,
+        exp_name="",
+        num_imgs=-1,
+    ) -> None:
+        # initialize random seed
+        np.random.seed(2810)
+        logger.info("Start the program")
         with open(cfg_path, "r") as f:
             config = yaml.safe_load(f)
         config["data_dir"] = data_dir
@@ -39,7 +49,7 @@ class JointReconstructCalib:
         # RGB camera intrinsics
         intrinsic_path = os.path.join(config["data_dir"], "intrinsics.txt")
         if os.path.exists(intrinsic_path):
-            config["K"] = np.loadtxt(intrinsic_path, dtype=np.float64)
+            config["K"] = np.loadtxt(intrinsic_path)
         else:
             raise NotImplementedError("No intrinsics is provided!")
 
@@ -51,18 +61,16 @@ class JointReconstructCalib:
             raise ValueError(
                 f"Not enough images in {config['img_dir']}. Found {total_num_imgs}, but expected {config['num_imgs']}."
             )
-        config["used_ids"] = np.sort(
-            np.random.choice(
-                np.arange(total_num_imgs), size=config["num_imgs"], replace=False
-            )
-        )
-        print(
-            f"Using {config['num_imgs']} images for calibration with indices:",
+        config["used_ids"] = np.arange(config["num_imgs"])
+        logger.info(
+            "Using %d images for calibration with indices: %s",
+            config["num_imgs"],
             config["used_ids"],
         )
 
         # Save folder
-        exp_name = data_dir.split("/")[-1]
+        if not exp_name:
+            exp_name = data_dir.split("/")[-1]
         self.save_dir = os.path.join(
             config["out_dir"], exp_name, f"{config['num_imgs']:02d}_imgs"
         )
@@ -73,8 +81,6 @@ class JointReconstructCalib:
         self.cfg = config
 
     def run(self):
-        # Save used indices
-        np.save(os.path.join(self.save_dir, "used_indices.npy"), self.cfg["used_ids"])
 
         # Hand
         hand2base_poses = load_hand_poses(
@@ -98,6 +104,7 @@ class JointReconstructCalib:
         pts, rgb_colors, pts_errors = points3D[:, :3], points3D[:, 3:6], points3D[:, 6]
         raw_data = {
             "K": K,
+            "hand2base": hand2base_poses,
             "eye2world": eye2world_poses,
             "pts_in_world": pts,
             "pts_colors": rgb_colors,
@@ -112,18 +119,18 @@ class JointReconstructCalib:
         )
 
         # Solve AX=XB
-        eq_solver = EqSolver(
+        logger.info("Start solving AX=XB")
+        eq_solver = AXXBSolver(
             cfg=self.cfg,
             eye2world_poses=eye2world_poses,
             hand2base_poses=hand2base_poses,
         )
-        R_eye2hand, t_eye2hand, scale = eq_solver.solve()
-        print("<>" * 20)
+        R_eye2hand, t_eye2hand, scale = eq_solver.run()
         T_eye2hand = np.eye(4)
         T_eye2hand[:3, :3] = R_eye2hand
         T_eye2hand[:3, 3] = t_eye2hand
-        print("T_eye2hand:\n", T_eye2hand)
-        print("scale: ", scale)
+        logger.info("T_eye2hand:\n%s", T_eye2hand)
+        logger.info("scale: %s", scale)
         np.savetxt(
             os.path.join(self.save_dir, "init_T_eye2hand.txt"), T_eye2hand, fmt="%.6f"
         )
@@ -134,16 +141,15 @@ class JointReconstructCalib:
         eye2base_poses = hand2base_poses @ T_eye2hand
         world2eye_poses = np.asarray([inv(pose) for pose in eye2world_poses])
         idx = 0
-        pts_in_base = geomu.transform_pts_np(
+        pts_in_base = util_pkg.transform_pts_np(
             pts, eye2base_poses[idx] @ world2eye_poses[idx]
         )
 
         ############################# for debugging #############################
         # check for obj2base transformation
-        print("<>" * 20)
-        print("obj2base transformation:")
-        for idx in range(self.cfg["num_imgs"]):
-            print(eye2base_poses[idx] @ world2eye_poses[idx])
+        # print("obj2base transformation:")
+        # for idx in range(self.cfg["num_imgs"]):
+        #     print(eye2base_poses[idx] @ world2eye_poses[idx])
         ############################# for debugging #############################
 
         # Visualize constructed ptc
@@ -174,9 +180,7 @@ class JointReconstructCalib:
         )
 
         # Run bundle adjustment
-        print(
-            "----------------------- Run bundle adjustment ----------------------------------"
-        )
+        logger.info("Start Bundle Adjustment")
         ba = HandEyeBundleAdjustment(
             K=K,
             hand2eye_pose=inv(T_eye2hand),
@@ -217,18 +221,60 @@ class JointReconstructCalib:
             ),
             **final_data,
         )
-        print("<>" * 20)
-        print(f"All results are saved.")
-
-
-def main():
-    cfg_path = "config/calib.yaml"
-
-    data_dir = "data/easyscene"
-    out_dir = "results"
-    sys = JointReconstructCalib(cfg_path=cfg_path, data_dir=data_dir, out_dir=out_dir)
-    sys.run()
+        logger.info("All results are saved to %s\n", self.save_dir)
 
 
 if __name__ == "__main__":
-    main()
+    # Set up logger
+    logger_setup = LoggerSetup(
+        name="hand_eye_calibration",
+        log_file="calibration_run.log",
+        file_level=logging.DEBUG,
+        console_level=logging.INFO,
+    )
+    logger = logger_setup.setup_logger()
+
+    # Set up args for running the script
+    parser = argparse.ArgumentParser(
+        description="A script to process calibration and data files."
+    )
+    parser.add_argument(
+        "--cfg_path",
+        type=str,
+        default="config/calib.yaml",
+        help="Path to the configuration YAML file. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="data/demo",
+        help="Path to the input data directory. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="results",
+        help="Path to the output directory for saving results. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--exp_name",
+        type=str,
+        default="",
+        help="The name of the experiment. (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--num_imgs",
+        type=int,
+        default="-1",
+        help="Number of images used. (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    RoboSys = JointReconstructCalib(
+        cfg_path=args.cfg_path,
+        data_dir=args.data_dir,
+        out_dir=args.out_dir,
+        exp_name=args.exp_name,
+        num_imgs=args.num_imgs,
+    )
+    RoboSys.run()
