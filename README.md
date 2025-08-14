@@ -1,4 +1,6 @@
-## Data format
+# Joint 3D Scene Reconstruction and Hand-Eye Calibration System
+
+## Input data format
 
 ```bash
 ├── exp_name
@@ -7,25 +9,50 @@
 │   │   ├── 01.png
 │   │   ├── ...
 │   └── hand_tum.txt (MUST | Hand to base transformations, in TUM format)
-│   └── intrinsics.txt (OPTIONAL | The 3x3 intrinsic matrix of the camera)
+│   └── intrinsics.txt (CURRENTLY MUST | The 3x3 intrinsic matrix of the camera)
 ```
-
-
 
 ## Setup
 1. Construct a conda env.
 2. Follow the instructions in mast3r (`faiss-gpu-cu12`, no need to install optional)
 3. for pycolmap, maybe you can install with conda
-4. plotly pycolmap kapture kapture-localization seaborn
+4. `pip install plotly pycolmap kapture kapture-localization seaborn`
+
+## Run
+
+```bash
+python run.py --data_dir ./data/exp_name
+```
+Read [run.py](./run.py#L237) for more.
+
+## Output
+
+```bash
+out_dir/
+└── exp_name
+    └── num_imgs
+        ├── ba_T_eye2hand.txt
+        ├── ba_scene.html
+        ├── colmap
+        │   ├── colmap.db
+        │   ├── colmap_raw.json
+        │   ├── pairs.txt
+        │   └── reconstruction
+        │       └── 0
+        │           ├── cameras.bin
+        │           ├── images.bin
+        │           └── points3D.bin
+        ├── "$exp_name"_"$num_imgs"_final.npz
+        ├── "$exp_name"_"$num_imgs"_init.npz
+        ├── "$exp_name"_"$num_imgs"_raw.npz
+        ├── init_T_eye2hand.txt
+        └── init_scene.html
+```
+
+<!-- ## Correspondences -->
 
 
-https://pypi.tuna.tsinghua.edu.cn/simple
-
-
-## Correspondences
-
-
-## FLow of Codes
+<!-- ## FLow of Codes
 
 `model_api.py`:
 `pairs`: list
@@ -40,5 +67,5 @@ line 96-105
         "view1": quite similar to `images`, but the batch size is 4, "img" (4, 3, 384, 512)
         "view2": the corresponding pair for "view1"
         "pred1" and "pred2": "pts3d" (4, 384, 512, 3), "conf" (4, 384, 512), "desc" (4, 384, 512, 24), "desc_conf" (4, 384, 512)
-    `im_images_chunk`: dict, keys are something like (0,1), (1,2) etc. Each elements contains (n, 2) matches 
+    `im_images_chunk`: dict, keys are something like (0,1), (1,2) etc. Each elements contains (n, 2) matches  -->
 
